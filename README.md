@@ -5,6 +5,45 @@ x86/x64. Developed in Visual Studio 2022 using the XP-capable v141_xp toolset.
 The solution also defines W10/v143 builds for a subsequent Windows 10 compatibility
 check.
 
+## Child menu, toolbar icons and folder activation
+
+The child menu strip now contains File / Edit / View / Favorites / Tools /
+Navigate / Window. The child Help item has been removed; **About Windows**
+remains in the main MDI frame's Help menu.
+
+Each child now uses one native common-controls `TOOLBARCLASSNAMEW` control
+with six icon-only buttons: Back, Forward, Up, Folders, New Window and
+Refresh. The images come from the built-in History, View and Standard
+common-control image strips present on XP. Text labels are available as
+tooltips; the address field and Go button remain separate.
+
+### Shell folder activation
+
+A folder opened by double-clicking or pressing Enter inside the embedded
+native Shell view should navigate **within the originating MDI child**.
+The host now implements `IServiceProvider` for top-level/in-place browser
+service lookup and `ICommDlgBrowser::OnDefaultCommand` for handling folder
+activation. It checks the focused Shell item through `IFolderView` and
+`IShellFolder::GetAttributesOf`, and queues folder navigation until the
+Shell's callback returns rather than destroying a view reentrantly.
+
+`IShellBrowser::BrowseObject` also queues browse requests and honours
+`SBSP_NEWBROWSER` by opening another **WindowExplorer MDI child**, instead
+of starting a separate Explorer host. Executable and document file
+activation remains delegated to the Windows Shell; it is not redirected
+into a folder window. The change targets ordinary in-view folder activation.
+Shell extensions or context-menu commands explicitly starting an external
+Explorer process may still require separate integration.
+
+**XP verification is essential:** the Shell decides which host callbacks to
+invoke and may exhibit different behavior on XP and W10. This is an
+implementation to test, not a claim that all native Shell navigation
+routes have been verified. First check a drive and nested folders by double-
+click/Enter, verify Back and Forward in the same child, and test files
+separately. If XP still launches explorer.exe, note the exact action
+(double-click, Enter, right-click Open, or Open in New Window) so the
+remaining Shell path can be identified.
+
 ## About Windows and Select All
 
 The **main MDI frame** now has an ordinary Win32 **Help > About Windows...**
@@ -167,7 +206,7 @@ is ignored by Git.
 
 ## Current development status
 
-The earlier Shell-view, child navigation and tree versions were
-demonstrated on XP x64. This **menu/edit/shutdown update is committed
-but has not yet been compiled or runtime-tested on XP or W10**.
-Some Edit operations rely on XP Shell behavior and require verification.
+Previous versions of the native folder view, MDI layout and custom About
+Windows were demonstrated on XP x64. The new **icon-toolbar and Shell
+navigation-host update is committed but has not been built or tested
+on XP/W10**. In-place folder opening is the primary acceptance test.

@@ -5,6 +5,8 @@
 #include <commctrl.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <shlguid.h>
+#include <servprov.h>
 #include <shellapi.h>
 #include <vector>
 #include <string>
@@ -22,8 +24,9 @@ enum {
     IDC_CHILD_MENU_NAVIGATE = 108, IDC_CHILD_MENU_VIEW = 109,
     IDC_CHILD_MENU_WINDOW = 110, IDC_CHILD_MENU_EDIT = 111,
     IDC_CHILD_MENU_FAVORITES = 112, IDC_CHILD_MENU_TOOLS = 113,
-    IDC_CHILD_MENU_HELP = 114, IDC_FOLDERS = 115, IDC_TREE = 116,
+    IDC_FOLDERS = 115, IDC_TREE = 116,
     IDC_TOOL_NEW = 117, IDC_TOOL_REFRESH = 118,
+    IDC_CHILD_TOOLBAR = 122,
     IDC_CHILD_MENUBAR = 121,
     IDM_NEW = 1001, IDM_CLOSE = 1002, IDM_EXIT = 1003,
     IDM_BACK = 1004, IDM_UP = 1005, IDM_GO = 1006,
@@ -31,7 +34,7 @@ enum {
     IDM_TILE_H = 1009, IDM_TILE_V = 1010, IDM_ADDRESS = 1011,
     IDM_FORWARD = 1012, IDM_FOLDERS = 1013,
     IDM_VIEW_ICONS = 1014, IDM_VIEW_LIST = 1015,
-    IDM_VIEW_DETAILS = 1016, IDM_ABOUT = 1017,
+    IDM_VIEW_DETAILS = 1016,
     IDM_SELECT_ALL = 1018, IDM_FAVORITE_ADD = 1019,
     IDM_SHOW_STATUS = 1020, IDM_SHOW_TOOLBAR = 1021,
     IDM_SHOW_ADDRESS = 1022, IDM_GLOBAL_SETTINGS = 1023,
@@ -42,9 +45,10 @@ enum {
     IDM_EDIT_MOVE_TO = 1036, IDM_EDIT_INVERT = 1037,
     IDM_EDIT_DELETE = 1038, IDM_EDIT_RENAME = 1039,
     IDM_EDIT_PROPERTIES = 1040, IDM_ABOUT_WINDOWS = 1041,
+    WM_OPEN_SHELL_FOLDER = WM_APP + 2,
     IDM_MENU_FILE = 1050, IDM_MENU_EDIT = 1051,
     IDM_MENU_VIEW = 1052, IDM_MENU_FAVORITES = 1053,
-    IDM_MENU_TOOLS = 1054, IDM_MENU_HELP = 1055,
+    IDM_MENU_TOOLS = 1054,
     IDM_MENU_NAVIGATE = 1056, IDM_MENU_WINDOW = 1057,
     IDM_FAVORITE_FIRST = 4000, IDM_FAVORITE_LAST = 4049,
     IDM_FIRST_CHILD = 30000,
@@ -54,12 +58,18 @@ enum {
 static const wchar_t kFrameClass[] = L"WindowExplorer.Frame";
 static const wchar_t kChildClass[] = L"WindowExplorer.Folder";
 static const wchar_t kMenuStripClass[] = L"WindowExplorer.ChildMenuStrip";
-static const wchar_t* const kChildMenus[8] = {
+static const wchar_t* const kChildMenus[7] = {
     L"File", L"Edit", L"View", L"Favorites", L"Tools",
-    L"Help", L"Navigate", L"Window"
+    L"Navigate", L"Window"
 };
-static const int kChildMenuWidths[8] = {
-    43, 43, 49, 75, 50, 47, 77, 69
+static const int kChildMenuWidths[7] = {
+    43, 43, 49, 75, 50, 77, 69
+};
+static const GUID kTopLevelBrowserService = {
+    0x4C96BE40,0x915C,0x11CF,{0x99,0xD3,0x00,0xAA,0x00,0x4A,0xE8,0x37}
+};
+static const GUID kInPlaceBrowserService = {
+    0x1D2AE02B,0x3655,0x46CC,{0xB6,0x3A,0x28,0x59,0x88,0x15,0x3B,0xCA}
 };
 static HINSTANCE g_instance = NULL;
 static HWND g_frame = NULL, g_mdi = NULL;
@@ -158,16 +168,15 @@ static void ApplyDefaultsToAllChildren();
 static FolderBrowser* BrowserFor(HWND child);
 static LRESULT CALLBACK ChildMenuProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
-class FolderBrowser : public IShellBrowser {
+class FolderBrowser : public IShellBrowser, public IServiceProvider,
+                      public ICommDlgBrowser {
 public:
     explicit FolderBrowser(HWND child)
         : refs_(1), child_(child), viewWindow_(NULL), view_(NULL),
           folder_(NULL), pidl_(NULL), historyIndex_(-1),
           navigating_(false), closed_(false), editingAddress_(false),
-          address_(NULL), back_(NULL), forward_(NULL), up_(NULL),
-          go_(NULL), status_(NULL), tree_(NULL), folders_(NULL),
-          toolNew_(NULL), toolRefresh_(NULL),
-          menuBar_(NULL), treeRoot_(NULL),
+          address_(NULL), go_(NULL), status_(NULL), tree_(NULL),
+          toolbar_(NULL), menuBar_(NULL), treeRoot_(NULL),
           syncingTree_(false), showFolders_(g_defaults.folders),
           viewMode_(g_defaults.mode) {}
 
@@ -184,6 +193,36 @@ public:
             historyIndex_ + 1 < static_cast<int>(history_.size());
     }
     bool CanUp() const { return pidl_ && pidl_->mkid.cb != 0; }
+
+    // Defer Shell-originated navigation until the Shell view's own
+    // double-click/Enter callback has returned. Destroying a view from
+    // inside its callback can reenter Shell32 and leave dangling windows.
+    HRESULT QueueOpenFolder(LPCITEMIDLIST destination, bool newWindow) {
+        if (!destination || closed_ || g_shuttingDown) return E_INVALIDARG;
+        LPITEMIDLIST copy = ILClone(destination);
+        if (!copy) return E_OUTOFMEMORY;
+        pending_.push_back(copy);
+        if (!PostMessageW(child_, WM_OPEN_SHELL_FOLDER,
+                newWindow ? 1 : 0, reinterpret_cast<LPARAM>(copy))) {
+            pending_.pop_back();
+            CoTaskMemFree(copy);
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+        return S_OK;
+    }
+
+    void HandleOpenFolder(LPITEMIDLIST location, bool newWindow) {
+        std::vector<LPITEMIDLIST>::iterator pos =
+            std::find(pending_.begin(), pending_.end(), location);
+        if (pos == pending_.end()) return;
+        pending_.erase(pos);
+        if (!closed_ && !g_shuttingDown) {
+            HRESULT hr = newWindow ? NewFolderWindow(location) :
+                Navigate(location);
+            if (FAILED(hr)) ShowFailure(child_, L"Open Shell folder", hr);
+        }
+        CoTaskMemFree(location);
+    }
     LPCITEMIDLIST Location() const { return pidl_; }
     HWND AddressEdit() const { return address_; }
 
@@ -191,18 +230,47 @@ public:
         menuBar_ = CreateWindowW(kMenuStripClass, L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, child_,
             reinterpret_cast<HMENU>(IDC_CHILD_MENUBAR), g_instance, NULL);
-        back_ = CreateWindowW(L"BUTTON", L"Back", WS_CHILD | WS_VISIBLE,
-            0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_BACK),
+        // Native common-controls toolbar: XP supplies the standard bitmap
+        // strips, so there are no external icons or text-only push buttons.
+        toolbar_ = CreateWindowExW(0, TOOLBARCLASSNAMEW, NULL,
+            WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | TBSTYLE_TOOLTIPS |
+            CCS_NOPARENTALIGN | CCS_NORESIZE | CCS_NODIVIDER,
+            0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_CHILD_TOOLBAR),
             g_instance, NULL);
-        forward_ = CreateWindowW(L"BUTTON", L"Forward", WS_CHILD | WS_VISIBLE,
-            0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_FORWARD),
-            g_instance, NULL);
-        up_ = CreateWindowW(L"BUTTON", L"Up", WS_CHILD | WS_VISIBLE,
-            0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_UP),
-            g_instance, NULL);
-        folders_ = CreateWindowW(L"BUTTON", L"Folders",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, child_,
-            reinterpret_cast<HMENU>(IDC_FOLDERS), g_instance, NULL);
+        if (toolbar_) {
+            SendMessageW(toolbar_, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+            const int history = static_cast<int>(SendMessageW(toolbar_,
+                TB_LOADIMAGES, IDB_HIST_SMALL_COLOR,
+                reinterpret_cast<LPARAM>(HINST_COMMCTRL)));
+            const int standard = static_cast<int>(SendMessageW(toolbar_,
+                TB_LOADIMAGES, IDB_STD_SMALL_COLOR,
+                reinterpret_cast<LPARAM>(HINST_COMMCTRL)));
+            const int folderViews = static_cast<int>(SendMessageW(toolbar_,
+                TB_LOADIMAGES, IDB_VIEW_SMALL_COLOR,
+                reinterpret_cast<LPARAM>(HINST_COMMCTRL)));
+            const int icons[] = {
+                history + HIST_BACK, history + HIST_FORWARD,
+                folderViews + VIEW_PARENTFOLDER, history + HIST_VIEWTREE,
+                standard + STD_FILENEW, standard + STD_REDOW
+            };
+            const int commands[] = {
+                IDC_BACK, IDC_FORWARD, IDC_UP, IDC_FOLDERS,
+                IDC_TOOL_NEW, IDC_TOOL_REFRESH
+            };
+            TBBUTTON buttons[6];
+            ZeroMemory(buttons, sizeof(buttons));
+            for (int i = 0; i < 6; ++i) {
+                buttons[i].iBitmap = icons[i];
+                buttons[i].idCommand = commands[i];
+                buttons[i].fsState = TBSTATE_ENABLED;
+                buttons[i].fsStyle = TBSTYLE_BUTTON;
+            }
+            SendMessageW(toolbar_, TB_ADDBUTTONSW, 6,
+                reinterpret_cast<LPARAM>(buttons));
+            SendMessageW(toolbar_, TB_SETBUTTONSIZE, 0,
+                MAKELONG(28, 26));
+            SendMessageW(toolbar_, TB_AUTOSIZE, 0, 0);
+        }
         tree_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
             TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT |
@@ -228,21 +296,14 @@ public:
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
             0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_ADDRESS),
             g_instance, NULL);
-        toolNew_ = CreateWindowW(L"BUTTON", L"New", WS_CHILD | WS_VISIBLE,
-            0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_TOOL_NEW),
-            g_instance, NULL);
-        toolRefresh_ = CreateWindowW(L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE,
-            0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_TOOL_REFRESH),
-            g_instance, NULL);
         go_ = CreateWindowW(L"BUTTON", L"Go", WS_CHILD | WS_VISIBLE,
             0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_GO),
             g_instance, NULL);
         status_ = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE |
             SS_LEFTNOWORDWRAP, 0, 0, 0, 0, child_,
             reinterpret_cast<HMENU>(IDC_STATUS), g_instance, NULL);
-        if (!menuBar_ || !back_ || !forward_ || !up_ || !address_ ||
-            !go_ || !status_ || !tree_ || !folders_ ||
-            !toolNew_ || !toolRefresh_)
+        if (!menuBar_ || !toolbar_ || !address_ ||
+            !go_ || !status_ || !tree_)
             return false;
         Layout();
         UpdateControls();
@@ -271,15 +332,10 @@ public:
             width > 0 ? width : 0, 28, TRUE);
         const bool showToolbar = g_defaults.toolbar;
         const bool showAddress = g_defaults.address;
-        HWND bar[] = { back_, forward_, up_, folders_,
-            toolNew_, toolRefresh_ };
-        const int widths[] = { 51, 65, 38, 65, 45, 61 };
-        int x = 3;
-        for (int i = 0; i < 6; ++i) {
-            if (!bar[i]) continue;
-            ShowWindow(bar[i], showToolbar ? SW_SHOW : SW_HIDE);
-            if (showToolbar) MoveWindow(bar[i], x, 30, widths[i], 24, TRUE);
-            x += widths[i] + 2;
+        if (toolbar_) {
+            ShowWindow(toolbar_, showToolbar ? SW_SHOW : SW_HIDE);
+            if (showToolbar) MoveWindow(toolbar_, 0, 30,
+                width > 0 ? width : 0, 27, TRUE);
         }
         if (address_) {
             ShowWindow(address_, showAddress ? SW_SHOW : SW_HIDE);
@@ -310,9 +366,14 @@ public:
     }
 
     void UpdateControls() {
-        if (back_) EnableWindow(back_, CanBack());
-        if (forward_) EnableWindow(forward_, CanForward());
-        if (up_) EnableWindow(up_, CanUp());
+        if (toolbar_) {
+            SendMessageW(toolbar_, TB_ENABLEBUTTON, IDC_BACK,
+                MAKELONG(CanBack(), 0));
+            SendMessageW(toolbar_, TB_ENABLEBUTTON, IDC_FORWARD,
+                MAKELONG(CanForward(), 0));
+            SendMessageW(toolbar_, TB_ENABLEBUTTON, IDC_UP,
+                MAKELONG(CanUp(), 0));
+        }
         if (address_ && !editingAddress_) {
             std::wstring text;
             Address(text);
@@ -428,6 +489,9 @@ public:
             CoTaskMemFree(history_[i]);
         history_.clear();
         historyIndex_ = -1;
+        for (size_t i = 0; i < pending_.size(); ++i)
+            CoTaskMemFree(pending_[i]);
+        pending_.clear();
         if (tree_) TreeView_DeleteAllItems(tree_);
         treeRoot_ = NULL;
     }
@@ -627,6 +691,54 @@ public:
         return hr;
     }
 
+    // XP's Shell view may ask its host for the browser via the site
+    // service chain rather than call IShellBrowser::BrowseObject directly.
+    STDMETHODIMP QueryService(REFGUID service, REFIID riid, void** result) {
+        if (!result) return E_POINTER;
+        *result = NULL;
+        if (IsEqualGUID(service, kTopLevelBrowserService) ||
+            IsEqualGUID(service, kInPlaceBrowserService) ||
+            IsEqualGUID(service, IID_IShellBrowser))
+            return QueryInterface(riid, result);
+        return E_NOINTERFACE;
+    }
+
+    // XP's native DefView can report its default action to the host.
+    // Consume a folder activation and browse in-place; do not intercept
+    // documents or executables, which must retain their normal open verb.
+    STDMETHODIMP OnDefaultCommand(IShellView* invokingView) {
+        if (closed_ || g_shuttingDown || !invokingView ||
+            invokingView != view_ || !folder_ || !pidl_)
+            return S_FALSE;
+        IFolderView* fv = NULL;
+        HRESULT hr = invokingView->QueryInterface(IID_IFolderView,
+            reinterpret_cast<void**>(&fv));
+        if (FAILED(hr)) return S_FALSE;
+        int focused = -1;
+        LPITEMIDLIST relative = NULL;
+        hr = fv->GetFocusedItem(&focused);
+        if (SUCCEEDED(hr) && focused >= 0)
+            hr = fv->Item(focused, &relative);
+        fv->Release();
+        if (FAILED(hr) || !relative) return S_FALSE;
+        SFGAOF flags = SFGAO_FOLDER | SFGAO_BROWSABLE;
+        LPCITEMIDLIST childIds[] = { relative };
+        hr = folder_->GetAttributesOf(1, childIds, &flags);
+        HRESULT result = S_FALSE;
+        if (SUCCEEDED(hr) && (flags & SFGAO_FOLDER)) {
+            LPITEMIDLIST absolute = ILCombine(pidl_, relative);
+            if (absolute) {
+                result = SUCCEEDED(QueueOpenFolder(absolute, false)) ?
+                    S_OK : S_FALSE;
+                CoTaskMemFree(absolute);
+            }
+        }
+        CoTaskMemFree(relative);
+        return result;
+    }
+    STDMETHODIMP OnStateChange(IShellView*, ULONG) { return S_OK; }
+    STDMETHODIMP IncludeObject(IShellView*, LPCITEMIDLIST) { return S_OK; }
+
     // IUnknown / IOleWindow / IShellBrowser
     STDMETHODIMP QueryInterface(REFIID riid, void** object) {
         if (!object) return E_POINTER;
@@ -635,10 +747,15 @@ public:
             IsEqualIID(riid, IID_IOleWindow) ||
             IsEqualIID(riid, IID_IShellBrowser)) {
             *object = static_cast<IShellBrowser*>(this);
-            AddRef();
-            return S_OK;
+        } else if (IsEqualIID(riid, IID_IServiceProvider)) {
+            *object = static_cast<IServiceProvider*>(this);
+        } else if (IsEqualIID(riid, IID_ICommDlgBrowser)) {
+            *object = static_cast<ICommDlgBrowser*>(this);
+        } else {
+            return E_NOINTERFACE;
         }
-        return E_NOINTERFACE;
+        AddRef();
+        return S_OK;
     }
     STDMETHODIMP_(ULONG) AddRef() {
         return static_cast<ULONG>(InterlockedIncrement(&refs_));
@@ -669,10 +786,11 @@ public:
     STDMETHODIMP TranslateAcceleratorSB(MSG*, WORD) { return S_FALSE; }
 
     STDMETHODIMP BrowseObject(PCUIDLIST_RELATIVE target, UINT flags) {
-        if (closed_ || navigating_) return E_UNEXPECTED;
+        if (closed_ || g_shuttingDown) return E_UNEXPECTED;
+        if (flags & SBSP_NAVIGATEBACK) return Back();
+        if (flags & SBSP_NAVIGATEFORWARD) return Forward();
         if (flags & SBSP_PARENT) return Up();
         if (!target) return E_INVALIDARG;
-
         LPITEMIDLIST absolute = NULL;
         if (flags & SBSP_RELATIVE) {
             if (!pidl_) return E_UNEXPECTED;
@@ -681,11 +799,8 @@ public:
             absolute = ILClone(target);
         }
         if (!absolute) return E_OUTOFMEMORY;
-        HRESULT hr;
-        if (flags & SBSP_NEWBROWSER)
-            hr = NewFolderWindow(absolute);
-        else
-            hr = Navigate(absolute);
+        HRESULT hr = QueueOpenFolder(absolute,
+            (flags & SBSP_NEWBROWSER) != 0);
         CoTaskMemFree(absolute);
         return hr;
     }
@@ -728,13 +843,14 @@ private:
     IShellFolder* folder_;
     LPITEMIDLIST pidl_;
     std::vector<LPITEMIDLIST> history_;
+    std::vector<LPITEMIDLIST> pending_;
     int historyIndex_;
     bool navigating_;
     bool closed_;
     bool editingAddress_;
     HWND menuBar_;
-    HWND address_, back_, forward_, up_, go_, status_, tree_, folders_;
-    HWND toolNew_, toolRefresh_;
+    HWND address_, go_, status_, tree_;
+    HWND toolbar_;
     HTREEITEM treeRoot_;
     bool syncingTree_, showFolders_;
     FOLDERVIEWMODE viewMode_;
@@ -775,7 +891,7 @@ static FolderBrowser* BrowserFor(HWND child) {
 // real HMENU popup menus owned by the corresponding MDI child.
 static int MenuIndexAt(int x) {
     int left = 2;
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 7; ++i) {
         if (x >= left && x < left + kChildMenuWidths[i]) return i;
         left += kChildMenuWidths[i];
     }
@@ -844,8 +960,8 @@ static LRESULT CALLBACK ChildMenuProc(HWND hwnd, UINT msg,
         const int old = static_cast<int>(
             GetWindowLongPtrW(hwnd, GWLP_USERDATA)) - 1;
         int selected = old;
-        if (wp == VK_RIGHT) selected = (old + 1 + 8) % 8;
-        else if (wp == VK_LEFT) selected = (old + 7 + 8) % 8;
+        if (wp == VK_RIGHT) selected = (old + 1 + 7) % 7;
+        else if (wp == VK_LEFT) selected = (old + 6 + 7) % 7;
         else if (wp == VK_RETURN || wp == VK_DOWN || wp == VK_SPACE) {
             FolderBrowser* browser = BrowserFor(GetParent(hwnd));
             if (browser) browser->OpenMenu(old >= 0 ? old : 0);
@@ -904,7 +1020,7 @@ static void UpdateChrome() {
 }
 
 void FolderBrowser::OpenMenu(int index) {
-    if (index < 0 || index > 7 || !menuBar_ || g_shuttingDown) return;
+    if (index < 0 || index > 6 || !menuBar_ || g_shuttingDown) return;
     HMENU popup = CreatePopupMenu();
     if (!popup) return;
     switch (index) {
@@ -973,10 +1089,7 @@ void FolderBrowser::OpenMenu(int index) {
         AppendMenuW(popup, MF_STRING, IDM_GLOBAL_SETTINGS,
             L"Global display settings...");
         break;
-    case 5: // Help
-        AppendMenuW(popup, MF_STRING, IDM_ABOUT, L"&About WindowExplorer");
-        break;
-    case 6: // Navigate
+    case 5: // Navigate
         AppendMenuW(popup, MF_STRING | (CanBack() ? 0 : MF_GRAYED),
             IDM_BACK, L"&Back\tAlt+Left");
         AppendMenuW(popup, MF_STRING | (CanForward() ? 0 : MF_GRAYED),
@@ -986,7 +1099,7 @@ void FolderBrowser::OpenMenu(int index) {
         AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
         AppendMenuW(popup, MF_STRING, IDM_ADDRESS, L"&Address\tCtrl+L");
         break;
-    case 7: // Window
+    case 6: // Window
         AppendMenuW(popup, MF_STRING, IDM_CASCADE, L"&Cascade");
         AppendMenuW(popup, MF_STRING, IDM_TILE_H, L"Tile &horizontally");
         AppendMenuW(popup, MF_STRING, IDM_TILE_V, L"Tile &vertically");
@@ -1313,11 +1426,30 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
     case WM_SIZE:
         if (browser && wParam != SIZE_MINIMIZED) browser->Layout();
         break;
+    case WM_OPEN_SHELL_FOLDER:
+        if (browser)
+            browser->HandleOpenFolder(
+                reinterpret_cast<LPITEMIDLIST>(lParam), wParam != 0);
+        return 0;
     case WM_NOTIFY:
         if (browser && lParam) {
             NMHDR* notification = reinterpret_cast<NMHDR*>(lParam);
             if (g_shuttingDown && notification->code != TVN_DELETEITEMW)
                 return 0;
+            if (notification->code == TTN_GETDISPINFOW) {
+                NMTTDISPINFOW* tip =
+                    reinterpret_cast<NMTTDISPINFOW*>(lParam);
+                switch (notification->idFrom) {
+                case IDC_BACK: tip->lpszText = const_cast<LPWSTR>(L"Back"); break;
+                case IDC_FORWARD: tip->lpszText = const_cast<LPWSTR>(L"Forward"); break;
+                case IDC_UP: tip->lpszText = const_cast<LPWSTR>(L"Up one level"); break;
+                case IDC_FOLDERS: tip->lpszText = const_cast<LPWSTR>(L"Folders pane"); break;
+                case IDC_TOOL_NEW: tip->lpszText = const_cast<LPWSTR>(L"New MDI window"); break;
+                case IDC_TOOL_REFRESH: tip->lpszText = const_cast<LPWSTR>(L"Refresh"); break;
+                default: break;
+                }
+                return 0;
+            }
             if (notification->idFrom == IDC_TREE) {
                 NMTREEVIEWW* change = reinterpret_cast<NMTREEVIEWW*>(lParam);
                 if (notification->code == TVN_ITEMEXPANDINGW &&
@@ -1356,17 +1488,19 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
             browser->AddressChanged();
             return 0;
         }
-        if (HIWORD(wParam) == BN_CLICKED) {
-            switch (command) {
-            case IDC_FOLDERS: browser->ToggleFolders(); return 0;
-            case IDC_TOOL_NEW:
-                PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDM_NEW, 0), 0);
-                return 0;
-            case IDC_TOOL_REFRESH:
-                PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDM_REFRESH, 0), 0);
-                return 0;
-            default: break;
-            }
+        // A native toolbar emits WM_COMMAND with HIWORD(wParam) == 0,
+        // not BN_CLICKED; handle these IDs independently of notify code.
+        if (command == IDC_FOLDERS) {
+            browser->ToggleFolders();
+            return 0;
+        }
+        if (command == IDC_TOOL_NEW) {
+            PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDM_NEW, 0), 0);
+            return 0;
+        }
+        if (command == IDC_TOOL_REFRESH) {
+            PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDM_REFRESH, 0), 0);
+            return 0;
         }
         HRESULT hr = S_OK;
         if (command >= IDM_FAVORITE_FIRST &&
@@ -1384,9 +1518,8 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
         case IDM_MENU_VIEW: browser->OpenMenu(2); return 0;
         case IDM_MENU_FAVORITES: browser->OpenMenu(3); return 0;
         case IDM_MENU_TOOLS: browser->OpenMenu(4); return 0;
-        case IDM_MENU_HELP: browser->OpenMenu(5); return 0;
-        case IDM_MENU_NAVIGATE: browser->OpenMenu(6); return 0;
-        case IDM_MENU_WINDOW: browser->OpenMenu(7); return 0;
+        case IDM_MENU_NAVIGATE: browser->OpenMenu(5); return 0;
+        case IDM_MENU_WINDOW: browser->OpenMenu(6); return 0;
         case IDC_GO:
         case IDM_GO:
             browser->AddressGo(); return 0;
@@ -1499,12 +1632,7 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
             }
             return 0;
         }
-        case IDM_ABOUT:
-            MessageBoxW(hwnd,
-                L"WindowExplorer\nNative MDI host for Windows Shell views.\n"
-                L"Folder tree and per-window menus are XP-compatible Shell integrations.",
-                L"About WindowExplorer", MB_OK | MB_ICONINFORMATION);
-            return 0;
+
         case IDM_CASCADE:
             SendMessageW(g_mdi, WM_MDICASCADE, 0, 0);
             return 0;
@@ -1829,7 +1957,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
         { FVIRTKEY | FALT, 'V', IDM_MENU_VIEW },
         { FVIRTKEY | FALT, 'O', IDM_MENU_FAVORITES },
         { FVIRTKEY | FALT, 'T', IDM_MENU_TOOLS },
-        { FVIRTKEY | FALT, 'H', IDM_MENU_HELP },
         { FVIRTKEY | FALT, 'N', IDM_MENU_NAVIGATE },
         { FVIRTKEY | FALT, 'W', IDM_MENU_WINDOW },
         { FVIRTKEY | FCONTROL, 'Z', IDM_EDIT_UNDO },

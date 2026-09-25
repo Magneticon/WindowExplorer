@@ -1,0 +1,12 @@
+.vs/
+bin/
+WindowExplorer/obj/
+*.VC.db
+*.VC.opendb
+*.suo
+*.user
+*.pdb
+*.ilk
+*.tlog
+AI_BUILD_LOG_*.txt
+AI_RUN_LOG_*.txt

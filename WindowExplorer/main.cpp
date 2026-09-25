@@ -5,6 +5,7 @@
 #include <commctrl.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <shellapi.h>
 #include <vector>
 #include <string>
 #include <new>
@@ -23,7 +24,7 @@ enum {
     IDC_CHILD_MENU_FAVORITES = 112, IDC_CHILD_MENU_TOOLS = 113,
     IDC_CHILD_MENU_HELP = 114, IDC_FOLDERS = 115, IDC_TREE = 116,
     IDC_TOOL_NEW = 117, IDC_TOOL_REFRESH = 118,
-    IDC_TOOL_VIEW = 119, IDC_TOOL_FAVORITES = 120,
+    IDC_CHILD_MENUBAR = 121,
     IDM_NEW = 1001, IDM_CLOSE = 1002, IDM_EXIT = 1003,
     IDM_BACK = 1004, IDM_UP = 1005, IDM_GO = 1006,
     IDM_REFRESH = 1007, IDM_CASCADE = 1008,
@@ -35,6 +36,16 @@ enum {
     IDM_SHOW_STATUS = 1020, IDM_SHOW_TOOLBAR = 1021,
     IDM_SHOW_ADDRESS = 1022, IDM_GLOBAL_SETTINGS = 1023,
     IDM_VIEW_THUMBNAILS = 1024, IDM_VIEW_TILES = 1025,
+    IDM_EDIT_UNDO = 1030, IDM_EDIT_CUT = 1031,
+    IDM_EDIT_COPY = 1032, IDM_EDIT_PASTE = 1033,
+    IDM_EDIT_PASTE_LINK = 1034, IDM_EDIT_COPY_TO = 1035,
+    IDM_EDIT_MOVE_TO = 1036, IDM_EDIT_INVERT = 1037,
+    IDM_EDIT_DELETE = 1038, IDM_EDIT_RENAME = 1039,
+    IDM_EDIT_PROPERTIES = 1040,
+    IDM_MENU_FILE = 1050, IDM_MENU_EDIT = 1051,
+    IDM_MENU_VIEW = 1052, IDM_MENU_FAVORITES = 1053,
+    IDM_MENU_TOOLS = 1054, IDM_MENU_HELP = 1055,
+    IDM_MENU_NAVIGATE = 1056, IDM_MENU_WINDOW = 1057,
     IDM_FAVORITE_FIRST = 4000, IDM_FAVORITE_LAST = 4049,
     IDM_FIRST_CHILD = 30000,
     WM_UPDATE_CHROME = WM_APP + 1
@@ -42,9 +53,19 @@ enum {
 
 static const wchar_t kFrameClass[] = L"WindowExplorer.Frame";
 static const wchar_t kChildClass[] = L"WindowExplorer.Folder";
+static const wchar_t kMenuStripClass[] = L"WindowExplorer.ChildMenuStrip";
+static const wchar_t* const kChildMenus[8] = {
+    L"File", L"Edit", L"View", L"Favorites", L"Tools",
+    L"Help", L"Navigate", L"Window"
+};
+static const int kChildMenuWidths[8] = {
+    43, 43, 49, 75, 50, 47, 77, 69
+};
 static HINSTANCE g_instance = NULL;
 static HWND g_frame = NULL, g_mdi = NULL;
 static HACCEL g_accel = NULL;
+static bool g_shuttingDown = false;
+static HWND g_menuTracking = NULL;
 static std::vector<std::wstring> g_favorites;
 
 // Global MDI defaults are stored per Windows user. The same defaults are
@@ -134,6 +155,8 @@ static void UpdateChrome();
 static void LayoutFrame(HWND frame);
 static void ShowFailure(HWND owner, const wchar_t* operation, HRESULT hr);
 static void ApplyDefaultsToAllChildren();
+static FolderBrowser* BrowserFor(HWND child);
+static LRESULT CALLBACK ChildMenuProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
 class FolderBrowser : public IShellBrowser {
 public:
@@ -143,11 +166,10 @@ public:
           navigating_(false), closed_(false), editingAddress_(false),
           address_(NULL), back_(NULL), forward_(NULL), up_(NULL),
           go_(NULL), status_(NULL), tree_(NULL), folders_(NULL),
-          toolNew_(NULL), toolRefresh_(NULL), toolView_(NULL),
-          toolFavorites_(NULL), treeRoot_(NULL), syncingTree_(false),
-          showFolders_(g_defaults.folders), viewMode_(g_defaults.mode) {
-        for (int i = 0; i < 8; ++i) menus_[i] = NULL;
-    }
+          toolNew_(NULL), toolRefresh_(NULL),
+          menuBar_(NULL), treeRoot_(NULL),
+          syncingTree_(false), showFolders_(g_defaults.folders),
+          viewMode_(g_defaults.mode) {}
 
     virtual ~FolderBrowser() {
         Close();
@@ -166,19 +188,9 @@ public:
     HWND AddressEdit() const { return address_; }
 
     bool CreateControls() {
-        const wchar_t* captions[] = { L"&File", L"&Edit", L"&View",
-            L"&Favorites", L"&Tools", L"&Help", L"&Navigate", L"&Window" };
-        const int ids[] = { IDC_CHILD_MENU_FILE, IDC_CHILD_MENU_EDIT,
-            IDC_CHILD_MENU_VIEW, IDC_CHILD_MENU_FAVORITES,
-            IDC_CHILD_MENU_TOOLS, IDC_CHILD_MENU_HELP,
-            IDC_CHILD_MENU_NAVIGATE, IDC_CHILD_MENU_WINDOW };
-        for (int i = 0; i < 8; ++i) {
-            menus_[i] = CreateWindowW(L"BUTTON", captions[i],
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                0, 0, 0, 0, child_,
-                reinterpret_cast<HMENU>(static_cast<INT_PTR>(ids[i])),
-                g_instance, NULL);
-        }
+        menuBar_ = CreateWindowW(kMenuStripClass, L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0, child_,
+            reinterpret_cast<HMENU>(IDC_CHILD_MENUBAR), g_instance, NULL);
         back_ = CreateWindowW(L"BUTTON", L"Back", WS_CHILD | WS_VISIBLE,
             0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_BACK),
             g_instance, NULL);
@@ -222,21 +234,15 @@ public:
         toolRefresh_ = CreateWindowW(L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE,
             0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_TOOL_REFRESH),
             g_instance, NULL);
-        toolView_ = CreateWindowW(L"BUTTON", L"Views", WS_CHILD | WS_VISIBLE,
-            0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_TOOL_VIEW),
-            g_instance, NULL);
-        toolFavorites_ = CreateWindowW(L"BUTTON", L"Favorites", WS_CHILD | WS_VISIBLE,
-            0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_TOOL_FAVORITES),
-            g_instance, NULL);
         go_ = CreateWindowW(L"BUTTON", L"Go", WS_CHILD | WS_VISIBLE,
             0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_GO),
             g_instance, NULL);
         status_ = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE |
             SS_LEFTNOWORDWRAP, 0, 0, 0, 0, child_,
             reinterpret_cast<HMENU>(IDC_STATUS), g_instance, NULL);
-        for (int i = 0; i < 8; ++i) if (!menus_[i]) return false;
-        if (!back_ || !forward_ || !up_ || !address_ || !go_ || !status_ || !tree_ || !folders_ || !toolNew_ || !toolRefresh_ ||
-            !toolView_ || !toolFavorites_)
+        if (!menuBar_ || !back_ || !forward_ || !up_ || !address_ ||
+            !go_ || !status_ || !tree_ || !folders_ ||
+            !toolNew_ || !toolRefresh_)
             return false;
         Layout();
         UpdateControls();
@@ -261,19 +267,15 @@ public:
         GetClientRect(child_, &rc);
         const int width = rc.right - rc.left;
         const int height = rc.bottom - rc.top;
-        const int menuWidths[] = { 42, 42, 44, 76, 51, 43, 68, 61 };
-        int x = 3;
-        for (int i = 0; i < 8; ++i) {
-            if (menus_[i]) MoveWindow(menus_[i], x, 2, menuWidths[i], 24, TRUE);
-            x += menuWidths[i] + 2;
-        }
+        if (menuBar_) MoveWindow(menuBar_, 0, 0,
+            width > 0 ? width : 0, 28, TRUE);
         const bool showToolbar = g_defaults.toolbar;
         const bool showAddress = g_defaults.address;
-        HWND bar[] = { back_, forward_, up_, folders_, toolNew_,
-            toolRefresh_, toolView_, toolFavorites_ };
-        const int widths[] = { 51, 65, 38, 65, 45, 61, 47, 69 };
-        x = 3;
-        for (int i = 0; i < 8; ++i) {
+        HWND bar[] = { back_, forward_, up_, folders_,
+            toolNew_, toolRefresh_ };
+        const int widths[] = { 51, 65, 38, 65, 45, 61 };
+        int x = 3;
+        for (int i = 0; i < 6; ++i) {
             if (!bar[i]) continue;
             ShowWindow(bar[i], showToolbar ? SW_SHOW : SW_HIDE);
             if (showToolbar) MoveWindow(bar[i], x, 30, widths[i], 24, TRUE);
@@ -359,6 +361,9 @@ public:
     void ExpandTree(HTREEITEM node);
     void SyncTree();
     void SelectAll();
+    HRESULT EditCommand(UINT command);
+    HRESULT InvokeShellVerb(const char* verb, bool background);
+    HRESULT TransferSelectedFiles(bool move);
     HRESULT ChangeViewMode(FOLDERVIEWMODE mode) {
         if (!pidl_ || viewMode_ == mode) return S_FALSE;
         const FOLDERVIEWMODE previous = viewMode_;
@@ -727,9 +732,9 @@ private:
     bool navigating_;
     bool closed_;
     bool editingAddress_;
-    HWND menus_[8];
+    HWND menuBar_;
     HWND address_, back_, forward_, up_, go_, status_, tree_, folders_;
-    HWND toolNew_, toolRefresh_, toolView_, toolFavorites_;
+    HWND toolNew_, toolRefresh_;
     HTREEITEM treeRoot_;
     bool syncingTree_, showFolders_;
     FOLDERVIEWMODE viewMode_;
@@ -765,6 +770,103 @@ static FolderBrowser* BrowserFor(HWND child) {
         GetWindowLongPtrW(child, GWLP_USERDATA)) : NULL;
 }
 
+// Child windows cannot own an ordinary Win32 HMENU menu bar. This painted
+// menu strip presents the same menu labels/keyboard navigation, and opens
+// real HMENU popup menus owned by the corresponding MDI child.
+static int MenuIndexAt(int x) {
+    int left = 2;
+    for (int i = 0; i < 8; ++i) {
+        if (x >= left && x < left + kChildMenuWidths[i]) return i;
+        left += kChildMenuWidths[i];
+    }
+    return -1;
+}
+static LRESULT CALLBACK ChildMenuProc(HWND hwnd, UINT msg,
+                                      WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT paint;
+        HDC dc = BeginPaint(hwnd, &paint);
+        RECT bounds;
+        GetClientRect(hwnd, &bounds);
+        FillRect(dc, &bounds, GetSysColorBrush(COLOR_MENU));
+        SetBkMode(dc, TRANSPARENT);
+        const int selected = static_cast<int>(
+            GetWindowLongPtrW(hwnd, GWLP_USERDATA)) - 1;
+        int left = 2;
+        for (int i = 0; i < 8; ++i) {
+            RECT item = { left, 1, left + kChildMenuWidths[i], 27 };
+            if (i == selected || (g_menuTracking == hwnd && i == selected)) {
+                FillRect(dc, &item, GetSysColorBrush(COLOR_HIGHLIGHT));
+                SetTextColor(dc, GetSysColor(COLOR_HIGHLIGHTTEXT));
+            } else {
+                SetTextColor(dc, GetSysColor(COLOR_MENUTEXT));
+            }
+            DrawTextW(dc, kChildMenus[i], -1, &item,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            left += kChildMenuWidths[i];
+        }
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        const int hot = MenuIndexAt(GET_X_LPARAM(lp));
+        if (static_cast<int>(GetWindowLongPtrW(hwnd, GWLP_USERDATA)) != hot + 1) {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, hot + 1);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        TRACKMOUSEEVENT track;
+        ZeroMemory(&track, sizeof(track));
+        track.cbSize = sizeof(track);
+        track.dwFlags = TME_LEAVE;
+        track.hwndTrack = hwnd;
+        TrackMouseEvent(&track);
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    case WM_LBUTTONDOWN: {
+        const int index = MenuIndexAt(GET_X_LPARAM(lp));
+        FolderBrowser* browser = BrowserFor(GetParent(hwnd));
+        if (browser && index >= 0) {
+            SetFocus(hwnd);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, index + 1);
+            InvalidateRect(hwnd, NULL, FALSE);
+            browser->OpenMenu(index);
+        }
+        return 0;
+    }
+    case WM_GETDLGCODE:
+        return DLGC_WANTARROWS | DLGC_WANTCHARS;
+    case WM_KEYDOWN: {
+        const int old = static_cast<int>(
+            GetWindowLongPtrW(hwnd, GWLP_USERDATA)) - 1;
+        int selected = old;
+        if (wp == VK_RIGHT) selected = (old + 1 + 8) % 8;
+        else if (wp == VK_LEFT) selected = (old + 7 + 8) % 8;
+        else if (wp == VK_RETURN || wp == VK_DOWN || wp == VK_SPACE) {
+            FolderBrowser* browser = BrowserFor(GetParent(hwnd));
+            if (browser) browser->OpenMenu(old >= 0 ? old : 0);
+            return 0;
+        } else if (wp == VK_ESCAPE) {
+            HWND parent = GetParent(hwnd);
+            FolderBrowser* browser = BrowserFor(parent);
+            if (browser && browser->View())
+                browser->View()->UIActivate(SVUIA_ACTIVATE_FOCUS);
+            return 0;
+        } else return DefWindowProcW(hwnd, msg, wp, lp);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, selected + 1);
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
 static FolderBrowser* ActiveBrowser() {
     if (!g_mdi || !IsWindow(g_mdi)) return NULL;
     HWND child = reinterpret_cast<HWND>(
@@ -795,13 +897,14 @@ static void ApplyDefaultsToAllChildren() {
 }
 
 static void UpdateChrome() {
+    if (g_shuttingDown) return;
     // Folder controls are now owned by their individual MDI children.
     FolderBrowser* browser = ActiveBrowser();
     if (browser) browser->UpdateControls();
 }
 
 void FolderBrowser::OpenMenu(int index) {
-    if (index < 0 || index > 7 || !menus_[index]) return;
+    if (index < 0 || index > 7 || !menuBar_ || g_shuttingDown) return;
     HMENU popup = CreatePopupMenu();
     if (!popup) return;
     switch (index) {
@@ -812,7 +915,22 @@ void FolderBrowser::OpenMenu(int index) {
         AppendMenuW(popup, MF_STRING, IDM_EXIT, L"E&xit WindowExplorer");
         break;
     case 1: // Edit
+        AppendMenuW(popup, MF_STRING, IDM_EDIT_UNDO, L"&Undo\tCtrl+Z");
+        AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(popup, MF_STRING, IDM_EDIT_CUT, L"Cu&t\tCtrl+X");
+        AppendMenuW(popup, MF_STRING, IDM_EDIT_COPY, L"&Copy\tCtrl+C");
+        AppendMenuW(popup, MF_STRING, IDM_EDIT_PASTE, L"&Paste\tCtrl+V");
+        AppendMenuW(popup, MF_STRING, IDM_EDIT_PASTE_LINK, L"Paste &Shortcut");
+        AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(popup, MF_STRING, IDM_EDIT_COPY_TO, L"Copy To &Folder...");
+        AppendMenuW(popup, MF_STRING, IDM_EDIT_MOVE_TO, L"&Move To Folder...");
+        AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
         AppendMenuW(popup, MF_STRING, IDM_SELECT_ALL, L"Select &All\tCtrl+A");
+        AppendMenuW(popup, MF_STRING, IDM_EDIT_INVERT, L"&Invert Selection");
+        AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(popup, MF_STRING, IDM_EDIT_DELETE, L"&Delete\tDel");
+        AppendMenuW(popup, MF_STRING, IDM_EDIT_RENAME, L"&Rename\tF2");
+        AppendMenuW(popup, MF_STRING, IDM_EDIT_PROPERTIES, L"Propert&ies\tAlt+Enter");
         break;
     case 2: // View
         AppendMenuW(popup, MF_STRING | (viewMode_ == FVM_THUMBNAIL ? MF_CHECKED : 0),
@@ -875,14 +993,23 @@ void FolderBrowser::OpenMenu(int index) {
         break;
     }
     RECT anchor;
-    GetWindowRect(menus_[index], &anchor);
+    GetWindowRect(menuBar_, &anchor);
+    int offset = 2;
+    for (int i = 0; i < index; ++i) offset += kChildMenuWidths[i];
+    anchor.left += offset;
+    anchor.bottom = anchor.top + 27;
+    g_menuTracking = menuBar_;
+    InvalidateRect(menuBar_, NULL, FALSE);
     // Return the selected command rather than allowing a popup to dispatch
     // a WM_COMMAND to the enclosing frame. Post it to this exact child.
     const UINT selected = TrackPopupMenuEx(popup,
         TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
         anchor.left, anchor.bottom, child_, NULL);
     DestroyMenu(popup);
-    if (selected) PostMessageW(child_, WM_COMMAND, MAKEWPARAM(selected, 0), 0);
+    g_menuTracking = NULL;
+    if (IsWindow(menuBar_)) InvalidateRect(menuBar_, NULL, FALSE);
+    if (selected && IsWindow(child_) && !g_shuttingDown)
+        PostMessageW(child_, WM_COMMAND, MAKEWPARAM(selected, 0), 0);
 }
 
 
@@ -973,9 +1100,142 @@ void FolderBrowser::SyncTree() {
     syncingTree_ = false;
 }
 
+// The Shell view retains ownership of item selection and all clipboard
+// formats. Invoke actual Shell context-menu commands for selected objects
+// or the folder background rather than implementing a second clipboard.
+HRESULT FolderBrowser::InvokeShellVerb(const char* verb, bool background) {
+    if (!view_ || !verb) return E_FAIL;
+    IContextMenu* context = NULL;
+    HRESULT hr = view_->GetItemObject(background ? SVGIO_BACKGROUND :
+        SVGIO_SELECTION, IID_IContextMenu,
+        reinterpret_cast<void**>(&context));
+    if (FAILED(hr)) return hr;
+    HMENU menu = CreatePopupMenu();
+    if (!menu) {
+        context->Release();
+        return E_OUTOFMEMORY;
+    }
+    hr = context->QueryContextMenu(menu, 0, 1, 0x6FFF, CMF_NORMAL);
+    if (SUCCEEDED(hr)) {
+        CMINVOKECOMMANDINFO info;
+        ZeroMemory(&info, sizeof(info));
+        info.cbSize = sizeof(info);
+        info.hwnd = child_;
+        info.lpVerb = verb;
+        info.nShow = SW_SHOWNORMAL;
+        hr = context->InvokeCommand(&info);
+    }
+    DestroyMenu(menu);
+    context->Release();
+    return hr;
+}
+
+HRESULT FolderBrowser::TransferSelectedFiles(bool move) {
+    if (!view_) return E_FAIL;
+    IDataObject* selected = NULL;
+    HRESULT hr = view_->GetItemObject(SVGIO_SELECTION,
+        IID_IDataObject, reinterpret_cast<void**>(&selected));
+    if (FAILED(hr)) return hr;
+    FORMATETC format;
+    ZeroMemory(&format, sizeof(format));
+    format.cfFormat = CF_HDROP;
+    format.dwAspect = DVASPECT_CONTENT;
+    format.lindex = -1;
+    format.tymed = TYMED_HGLOBAL;
+    STGMEDIUM medium;
+    ZeroMemory(&medium, sizeof(medium));
+    hr = selected->GetData(&format, &medium);
+    selected->Release();
+    if (FAILED(hr)) return hr; // Virtual Shell folders may not expose paths.
+
+    HDROP files = reinterpret_cast<HDROP>(medium.hGlobal);
+    const UINT count = DragQueryFileW(files, 0xFFFFFFFF, NULL, 0);
+    std::vector<wchar_t> paths;
+    for (UINT i = 0; i < count; ++i) {
+        UINT length = DragQueryFileW(files, i, NULL, 0);
+        if (!length || length > 32760) continue;
+        size_t offset = paths.size();
+        paths.resize(offset + length + 1);
+        if (DragQueryFileW(files, i, &paths[offset], length + 1) != length)
+            paths.resize(offset);
+    }
+    ReleaseStgMedium(&medium);
+    if (paths.empty()) return S_FALSE;
+    paths.push_back(0); // SHFileOperation requires a double-NUL list.
+
+    BROWSEINFOW browse;
+    ZeroMemory(&browse, sizeof(browse));
+    browse.hwndOwner = child_;
+    browse.lpszTitle = move ? L"Move selected files to folder:" :
+        L"Copy selected files to folder:";
+    browse.ulFlags = BIF_RETURNONLYFSDIRS;
+    LPITEMIDLIST destination = SHBrowseForFolderW(&browse);
+    if (!destination) return S_FALSE; // The user cancelled.
+    wchar_t directory[MAX_PATH];
+    const BOOL valid = SHGetPathFromIDListW(destination, directory);
+    CoTaskMemFree(destination);
+    if (!valid) return E_FAIL;
+    std::vector<wchar_t> target(directory,
+        directory + lstrlenW(directory) + 1);
+    target.push_back(0);
+    SHFILEOPSTRUCTW operation;
+    ZeroMemory(&operation, sizeof(operation));
+    operation.hwnd = child_;
+    operation.wFunc = move ? FO_MOVE : FO_COPY;
+    operation.pFrom = &paths[0];
+    operation.pTo = &target[0];
+    operation.fFlags = FOF_ALLOWUNDO;
+    const int error = SHFileOperationW(&operation);
+    if (error || operation.fAnyOperationsAborted)
+        return error ? HRESULT_FROM_WIN32(static_cast<DWORD>(error)) : S_FALSE;
+    view_->Refresh();
+    return S_OK;
+}
+
+HRESULT FolderBrowser::EditCommand(UINT command) {
+    if (!view_ || closed_) return E_FAIL;
+    if (command == IDM_EDIT_COPY_TO || command == IDM_EDIT_MOVE_TO)
+        return TransferSelectedFiles(command == IDM_EDIT_MOVE_TO);
+    if (command == IDM_SELECT_ALL) { SelectAll(); return S_OK; }
+
+    const char* verb = NULL;
+    bool background = false;
+    UINT shellId = 0;
+    switch (command) {
+    case IDM_EDIT_UNDO:
+        verb = "undo"; background = true; shellId = 0x701B; break;
+    case IDM_EDIT_CUT:
+        verb = "cut"; shellId = 0x7018; break;
+    case IDM_EDIT_COPY:
+        verb = "copy"; shellId = 0x7019; break;
+    case IDM_EDIT_PASTE:
+        verb = "paste"; background = true; shellId = 0x701A; break;
+    case IDM_EDIT_PASTE_LINK:
+        verb = "pastelink"; background = true; shellId = 0x701C; break;
+    case IDM_EDIT_INVERT:
+        shellId = 0x7022; break;
+    case IDM_EDIT_DELETE:
+        verb = "delete"; shellId = 0x7011; break;
+    case IDM_EDIT_RENAME:
+        verb = "rename"; shellId = 0x7050; break;
+    case IDM_EDIT_PROPERTIES:
+        verb = "properties"; shellId = 0x7013; break;
+    default: return E_INVALIDARG;
+    }
+
+    // Prefer the documented IContextMenu verb interface. The legacy
+    // command IDs are a best-effort fallback for XP's SHELLDLL_DefView;
+    // they are not a public cross-version Shell API.
+    HRESULT hr = verb ? InvokeShellVerb(verb, background) : E_NOTIMPL;
+    if (FAILED(hr) && viewWindow_ && IsWindow(viewWindow_) && shellId) {
+        SendMessageW(viewWindow_, WM_COMMAND, MAKEWPARAM(shellId, 0), 0);
+        hr = S_OK; // WM_COMMAND does not report whether the Shell handled it.
+    }
+    return hr;
+}
+
 void FolderBrowser::SelectAll() {
     if (!viewWindow_) return;
-    // XP Shell view contains a native SysListView32 control.
     HWND list = FindWindowExW(viewWindow_, NULL, WC_LISTVIEWW, NULL);
     if (!list) {
         HWND inner = FindWindowExW(viewWindow_, NULL, L"SHELLDLL_DefView", NULL);
@@ -988,7 +1248,7 @@ void FolderBrowser::SelectAll() {
 }
 
 static HRESULT NewFolderWindow(LPCITEMIDLIST location) {
-    if (!g_mdi) return E_FAIL;
+    if (!g_mdi || g_shuttingDown) return E_FAIL;
     MDICREATESTRUCTW create;
     ZeroMemory(&create, sizeof(create));
     create.szClass = kChildClass;
@@ -1042,6 +1302,8 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
     case WM_NOTIFY:
         if (browser && lParam) {
             NMHDR* notification = reinterpret_cast<NMHDR*>(lParam);
+            if (g_shuttingDown && notification->code != TVN_DELETEITEMW)
+                return 0;
             if (notification->idFrom == IDC_TREE) {
                 NMTREEVIEWW* change = reinterpret_cast<NMTREEVIEWW*>(lParam);
                 if (notification->code == TVN_ITEMEXPANDINGW &&
@@ -1061,18 +1323,20 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
         }
         break;
     case WM_SETFOCUS:
-        if (browser && browser->View()) browser->Activate(true);
+        if (!g_shuttingDown && browser && browser->View())
+            browser->Activate(true);
         return 0;
     case WM_MDIACTIVATE:
-        if (browser) {
+        if (browser && !g_shuttingDown) {
             const bool active = (reinterpret_cast<HWND>(lParam) == hwnd);
             browser->Activate(active);
             if (active) browser->UpdateControls();
         }
-        if (g_frame) PostMessageW(g_frame, WM_UPDATE_CHROME, 0, 0);
+        if (!g_shuttingDown && g_frame)
+            PostMessageW(g_frame, WM_UPDATE_CHROME, 0, 0);
         break;
     case WM_COMMAND: {
-        if (!browser) break;
+        if (!browser || g_shuttingDown) return 0;
         const int command = LOWORD(wParam);
         if (command == IDC_ADDRESS && HIWORD(wParam) == EN_CHANGE) {
             browser->AddressChanged();
@@ -1080,14 +1344,6 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
         }
         if (HIWORD(wParam) == BN_CLICKED) {
             switch (command) {
-            case IDC_CHILD_MENU_FILE: browser->OpenMenu(0); return 0;
-            case IDC_CHILD_MENU_EDIT: browser->OpenMenu(1); return 0;
-            case IDC_CHILD_MENU_VIEW: browser->OpenMenu(2); return 0;
-            case IDC_CHILD_MENU_FAVORITES: browser->OpenMenu(3); return 0;
-            case IDC_CHILD_MENU_TOOLS: browser->OpenMenu(4); return 0;
-            case IDC_CHILD_MENU_HELP: browser->OpenMenu(5); return 0;
-            case IDC_CHILD_MENU_NAVIGATE: browser->OpenMenu(6); return 0;
-            case IDC_CHILD_MENU_WINDOW: browser->OpenMenu(7); return 0;
             case IDC_FOLDERS: browser->ToggleFolders(); return 0;
             case IDC_TOOL_NEW:
                 PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDM_NEW, 0), 0);
@@ -1095,8 +1351,6 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
             case IDC_TOOL_REFRESH:
                 PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDM_REFRESH, 0), 0);
                 return 0;
-            case IDC_TOOL_VIEW: browser->OpenMenu(2); return 0;
-            case IDC_TOOL_FAVORITES: browser->OpenMenu(3); return 0;
             default: break;
             }
         }
@@ -1111,6 +1365,14 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
             return 0;
         }
         switch (command) {
+        case IDM_MENU_FILE: browser->OpenMenu(0); return 0;
+        case IDM_MENU_EDIT: browser->OpenMenu(1); return 0;
+        case IDM_MENU_VIEW: browser->OpenMenu(2); return 0;
+        case IDM_MENU_FAVORITES: browser->OpenMenu(3); return 0;
+        case IDM_MENU_TOOLS: browser->OpenMenu(4); return 0;
+        case IDM_MENU_HELP: browser->OpenMenu(5); return 0;
+        case IDM_MENU_NAVIGATE: browser->OpenMenu(6); return 0;
+        case IDM_MENU_WINDOW: browser->OpenMenu(7); return 0;
         case IDC_GO:
         case IDM_GO:
             browser->AddressGo(); return 0;
@@ -1191,8 +1453,21 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
                 L"not yet controlled by WindowExplorer.",
                 L"Global display settings", MB_OK | MB_ICONINFORMATION);
             return 0;
+        case IDM_EDIT_UNDO:
+        case IDM_EDIT_CUT:
+        case IDM_EDIT_COPY:
+        case IDM_EDIT_PASTE:
+        case IDM_EDIT_PASTE_LINK:
+        case IDM_EDIT_COPY_TO:
+        case IDM_EDIT_MOVE_TO:
         case IDM_SELECT_ALL:
-            browser->SelectAll();
+        case IDM_EDIT_INVERT:
+        case IDM_EDIT_DELETE:
+        case IDM_EDIT_RENAME:
+        case IDM_EDIT_PROPERTIES:
+            hr = browser->EditCommand(command);
+            if (FAILED(hr))
+                ShowFailure(hwnd, L"Shell Edit command", hr);
             return 0;
         case IDM_FAVORITE_ADD: {
             // Filesystem favorites are also persisted for the current Windows user.
@@ -1226,7 +1501,7 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
             SendMessageW(g_mdi, WM_MDITILE, MDITILE_VERTICAL, 0);
             return 0;
         case IDM_EXIT:
-            DestroyWindow(g_frame);
+            PostMessageW(g_frame, WM_CLOSE, 0, 0);
             return 0;
         default:
             break;
@@ -1290,15 +1565,16 @@ static LRESULT CALLBACK FrameProc(HWND hwnd, UINT message,
         if (wParam != SIZE_MINIMIZED) LayoutFrame(hwnd);
         return 0;
     case WM_UPDATE_CHROME:
-        UpdateChrome();
+        if (!g_shuttingDown) UpdateChrome();
         return 0;
     case WM_COMMAND: {
         const int command = LOWORD(wParam);
         if (command == IDM_EXIT) {
-            DestroyWindow(hwnd);
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
             return 0;
         }
-        if (command >= IDM_NEW && command <= IDM_FAVORITE_ADD) {
+        if ((command >= IDM_NEW && command <= IDM_EDIT_PROPERTIES) ||
+            (command >= IDM_MENU_FILE && command <= IDM_MENU_WINDOW)) {
             FolderBrowser* browser = ActiveBrowser();
             if (browser)
                 return SendMessageW(browser->Child(), WM_COMMAND,
@@ -1313,8 +1589,39 @@ static LRESULT CALLBACK FrameProc(HWND hwnd, UINT message,
         break;
     }
     case WM_SETFOCUS:
-        if (g_mdi) SetFocus(g_mdi);
+        if (g_mdi && !g_shuttingDown) SetFocus(g_mdi);
         return 0;
+    case WM_CLOSE: {
+        if (g_shuttingDown) return 0;
+        g_shuttingDown = true;
+        // Explicitly close the native Shell views before their MDI client and
+        // OLE apartment go away. Leaving active views during parent teardown
+        // can keep Shell extensions and window references alive after Exit.
+        if (g_mdi && IsWindow(g_mdi)) {
+            for (;;) {
+                HWND victim = NULL;
+                for (HWND child = GetWindow(g_mdi, GW_CHILD);
+                     child; child = GetWindow(child, GW_HWNDNEXT)) {
+                    wchar_t klass[64];
+                    if (GetClassNameW(child, klass, 64) &&
+                        lstrcmpW(klass, kChildClass) == 0) {
+                        victim = child;
+                        break;
+                    }
+                }
+                if (!victim) break;
+                SendMessageW(g_mdi, WM_MDIDESTROY,
+                    reinterpret_cast<WPARAM>(victim), 0);
+                // Avoid an endless loop if an extension prevented destruction.
+                if (IsWindow(victim)) {
+                    DestroyWindow(victim);
+                    if (IsWindow(victim)) break;
+                }
+            }
+        }
+        DestroyWindow(hwnd);
+        return 0;
+    }
     case WM_DESTROY:
         g_mdi = NULL;
         PostQuitMessage(0);
@@ -1349,6 +1656,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
         OleUninitialize();
         return 1;
     }
+    wc.lpfnWndProc = ChildMenuProc;
+    wc.lpszClassName = kMenuStripClass;
+    wc.hbrBackground = GetSysColorBrush(COLOR_MENU);
+    if (!RegisterClassExW(&wc)) {
+        OleUninitialize();
+        return 1;
+    }
     wc.lpfnWndProc = ChildProc;
     wc.lpszClassName = kChildClass;
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
@@ -1363,6 +1677,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
         { FVIRTKEY | FCONTROL, 'L', IDM_ADDRESS },
         { FVIRTKEY | FCONTROL, 'F', IDM_FOLDERS },
         { FVIRTKEY | FCONTROL, 'A', IDM_SELECT_ALL },
+        { FVIRTKEY | FALT, 'F', IDM_MENU_FILE },
+        { FVIRTKEY | FALT, 'E', IDM_MENU_EDIT },
+        { FVIRTKEY | FALT, 'V', IDM_MENU_VIEW },
+        { FVIRTKEY | FALT, 'O', IDM_MENU_FAVORITES },
+        { FVIRTKEY | FALT, 'T', IDM_MENU_TOOLS },
+        { FVIRTKEY | FALT, 'H', IDM_MENU_HELP },
+        { FVIRTKEY | FALT, 'N', IDM_MENU_NAVIGATE },
+        { FVIRTKEY | FALT, 'W', IDM_MENU_WINDOW },
+        { FVIRTKEY | FCONTROL, 'Z', IDM_EDIT_UNDO },
+        { FVIRTKEY | FCONTROL, 'X', IDM_EDIT_CUT },
+        { FVIRTKEY | FCONTROL, 'C', IDM_EDIT_COPY },
+        { FVIRTKEY | FCONTROL, 'V', IDM_EDIT_PASTE },
+        { FVIRTKEY, VK_F2, IDM_EDIT_RENAME },
+        { FVIRTKEY, VK_DELETE, IDM_EDIT_DELETE },
+        { FVIRTKEY | FALT, VK_RETURN, IDM_EDIT_PROPERTIES },
         { FVIRTKEY | FALT, VK_LEFT, IDM_BACK },
         { FVIRTKEY | FALT, VK_RIGHT, IDM_FORWARD },
         { FVIRTKEY | FALT, VK_UP, IDM_UP },
@@ -1412,7 +1741,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
             browser->CancelAddress();
             continue;
         }
-        if (g_accel && TranslateAcceleratorW(g_frame, g_accel, &msg)) continue;
+        // The editable address bar keeps its own standard edit shortcuts.
+        // Do not turn Ctrl+A/C/X/V/Z or Delete into file operations there.
+        bool addressKey = false;
+        if (browser && browser->AddressEdit() &&
+            GetFocus() == browser->AddressEdit()) {
+            const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) {
+                if (ctrl && msg.wParam == 'A') {
+                    SendMessageW(browser->AddressEdit(), EM_SETSEL, 0, -1);
+                    continue;
+                }
+                if ((ctrl && (msg.wParam == 'X' || msg.wParam == 'C' ||
+                    msg.wParam == 'V' || msg.wParam == 'Z')) ||
+                    msg.wParam == VK_DELETE)
+                    addressKey = true;
+            }
+        }
+        if (!addressKey && g_accel &&
+            TranslateAcceleratorW(g_frame, g_accel, &msg)) continue;
         if (g_mdi && TranslateMDISysAccel(g_mdi, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);

@@ -131,8 +131,15 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="main.cpp" />
+    <ClCompile Include="main.cpp">
+      <!-- New output name invalidates old main.obj on the next build. -->
+      <ObjectFileName>$(IntDir)WindowExplorer_ChildUI_Build2.obj</ObjectFileName>
+    </ClCompile>
   </ItemGroup>
+  <!-- An unambiguous record of the source/project selected by MSBuild. -->
+  <Target Name="WindowExplorerBuildIdentity" BeforeTargets="ClCompile">
+    <Message Importance="High" Text="WindowExplorer CHILD-UI-BUILD-2: project $(MSBuildProjectFullPath); source $(MSBuildProjectDirectory)\main.cpp; target $(AtaTargetOS)/$(Platform); output $(OutDir)$(TargetName)$(TargetExt)" />
+  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>

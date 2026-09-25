@@ -88,3 +88,18 @@ A successful build does not establish that the Shell view actually works on XP.
 - This initial version uses basic application menus instead of merging the Shell
   view's complete command menu; some Explorer commands, preview panes, or
   version-specific features may require additional browser interfaces.
+
+## Confirming which executable was compiled
+
+For the next XP x64 GUI check, the updated program's **main-window title is
+`WindowExplorer [CHILD-UI-BUILD-2]`**. Its main menu reads **Application / Windows**,
+while every MDI child has **File / Navigate / View / Window** plus
+Back / Forward / Up / address / Go controls.
+
+The project now assigns a new object-file name to main.cpp to invalidate a
+possibly reused incremental build object. The build should show
+`WindowExplorer CHILD-UI-BUILD-2` and the full project/source/output paths.
+If an XP build reports success but its executable still shows the old main
+menu/title, compare the project and output path in that build message with the
+executable actually launched. The repository's `bin/` directory is ignored;
+GitHub tracks the source, **not** the generated EXE.

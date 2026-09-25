@@ -22,6 +22,8 @@ enum {
     IDC_CHILD_MENU_WINDOW = 110, IDC_CHILD_MENU_EDIT = 111,
     IDC_CHILD_MENU_FAVORITES = 112, IDC_CHILD_MENU_TOOLS = 113,
     IDC_CHILD_MENU_HELP = 114, IDC_FOLDERS = 115, IDC_TREE = 116,
+    IDC_TOOL_NEW = 117, IDC_TOOL_REFRESH = 118,
+    IDC_TOOL_VIEW = 119, IDC_TOOL_FAVORITES = 120,
     IDM_NEW = 1001, IDM_CLOSE = 1002, IDM_EXIT = 1003,
     IDM_BACK = 1004, IDM_UP = 1005, IDM_GO = 1006,
     IDM_REFRESH = 1007, IDM_CASCADE = 1008,
@@ -30,6 +32,9 @@ enum {
     IDM_VIEW_ICONS = 1014, IDM_VIEW_LIST = 1015,
     IDM_VIEW_DETAILS = 1016, IDM_ABOUT = 1017,
     IDM_SELECT_ALL = 1018, IDM_FAVORITE_ADD = 1019,
+    IDM_SHOW_STATUS = 1020, IDM_SHOW_TOOLBAR = 1021,
+    IDM_SHOW_ADDRESS = 1022, IDM_GLOBAL_SETTINGS = 1023,
+    IDM_VIEW_THUMBNAILS = 1024, IDM_VIEW_TILES = 1025,
     IDM_FAVORITE_FIRST = 4000, IDM_FAVORITE_LAST = 4049,
     IDM_FIRST_CHILD = 30000,
     WM_UPDATE_CHROME = WM_APP + 1
@@ -42,12 +47,93 @@ static HWND g_frame = NULL, g_mdi = NULL;
 static HACCEL g_accel = NULL;
 static std::vector<std::wstring> g_favorites;
 
+// Global MDI defaults are stored per Windows user. The same defaults are
+// applied to every existing child and to all children created later.
+struct ExplorerDefaults {
+    FOLDERVIEWMODE mode;
+    bool folders;
+    bool toolbar;
+    bool address;
+    bool status;
+    ExplorerDefaults() : mode(FVM_DETAILS), folders(true),
+        toolbar(true), address(true), status(true) {}
+};
+static ExplorerDefaults g_defaults;
+static const wchar_t kSettingsKey[] = L"Software\\Magneticon\\WindowExplorer";
+
+static DWORD ReadDword(HKEY key, const wchar_t* name, DWORD fallback) {
+    DWORD value = fallback, type = 0, bytes = sizeof(value);
+    if (RegQueryValueExW(key, name, NULL, &type,
+        reinterpret_cast<LPBYTE>(&value), &bytes) != ERROR_SUCCESS ||
+        type != REG_DWORD || bytes != sizeof(value)) return fallback;
+    return value;
+}
+static void WriteDword(HKEY key, const wchar_t* name, DWORD value) {
+    RegSetValueExW(key, name, 0, REG_DWORD,
+        reinterpret_cast<const BYTE*>(&value), sizeof(value));
+}
+static void LoadDefaults() {
+    HKEY key = NULL;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0,
+            KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return;
+    DWORD mode = ReadDword(key, L"ViewMode", FVM_DETAILS);
+    if (mode == FVM_ICON || mode == FVM_SMALLICON ||
+        mode == FVM_LIST || mode == FVM_DETAILS ||
+        mode == FVM_THUMBNAIL || mode == FVM_TILE)
+        g_defaults.mode = static_cast<FOLDERVIEWMODE>(mode);
+    g_defaults.folders = ReadDword(key, L"Folders", 1) != 0;
+    g_defaults.toolbar = ReadDword(key, L"Toolbar", 1) != 0;
+    g_defaults.address = ReadDword(key, L"Address", 1) != 0;
+    g_defaults.status = ReadDword(key, L"Status", 1) != 0;
+    DWORD count = ReadDword(key, L"FavoriteCount", 0);
+    if (count > 50) count = 50;
+    for (DWORD i = 0; i < count; ++i) {
+        wchar_t name[30], path[32768];
+        path[0] = 0;
+        wsprintfW(name, L"Favorite%lu", static_cast<unsigned long>(i));
+        DWORD type = 0, size = sizeof(path);
+        if (RegQueryValueExW(key, name, NULL, &type,
+                reinterpret_cast<LPBYTE>(path), &size) == ERROR_SUCCESS &&
+            type == REG_SZ && size >= sizeof(wchar_t) &&
+            size <= sizeof(path)) {
+            path[(size / sizeof(wchar_t)) - 1] = 0;
+            if (path[0] &&
+                std::find(g_favorites.begin(), g_favorites.end(), path)
+                    == g_favorites.end())
+                g_favorites.push_back(path);
+        }
+    }
+    RegCloseKey(key);
+}
+static void SaveDefaults() {
+    HKEY key = NULL;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, NULL,
+            0, KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS) return;
+    WriteDword(key, L"ViewMode", static_cast<DWORD>(g_defaults.mode));
+    WriteDword(key, L"Folders", g_defaults.folders ? 1 : 0);
+    WriteDword(key, L"Toolbar", g_defaults.toolbar ? 1 : 0);
+    WriteDword(key, L"Address", g_defaults.address ? 1 : 0);
+    WriteDword(key, L"Status", g_defaults.status ? 1 : 0);
+    const size_t count = g_favorites.size() < 50 ? g_favorites.size() : 50;
+    WriteDword(key, L"FavoriteCount", static_cast<DWORD>(count));
+    for (size_t i = 0; i < count; ++i) {
+        wchar_t name[30];
+        wsprintfW(name, L"Favorite%lu", static_cast<unsigned long>(i));
+        const std::wstring& path = g_favorites[i];
+        RegSetValueExW(key, name, 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(path.c_str()),
+            static_cast<DWORD>((path.length() + 1) * sizeof(wchar_t)));
+    }
+    RegCloseKey(key);
+}
+
 class FolderBrowser;
 static FolderBrowser* ActiveBrowser();
 static HRESULT NewFolderWindow(LPCITEMIDLIST location);
 static void UpdateChrome();
 static void LayoutFrame(HWND frame);
 static void ShowFailure(HWND owner, const wchar_t* operation, HRESULT hr);
+static void ApplyDefaultsToAllChildren();
 
 class FolderBrowser : public IShellBrowser {
 public:
@@ -57,8 +143,9 @@ public:
           navigating_(false), closed_(false), editingAddress_(false),
           address_(NULL), back_(NULL), forward_(NULL), up_(NULL),
           go_(NULL), status_(NULL), tree_(NULL), folders_(NULL),
-          treeRoot_(NULL), syncingTree_(false), showFolders_(true),
-          viewMode_(FVM_DETAILS) {
+          toolNew_(NULL), toolRefresh_(NULL), toolView_(NULL),
+          toolFavorites_(NULL), treeRoot_(NULL), syncingTree_(false),
+          showFolders_(g_defaults.folders), viewMode_(g_defaults.mode) {
         for (int i = 0; i < 8; ++i) menus_[i] = NULL;
     }
 
@@ -129,6 +216,18 @@ public:
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
             0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_ADDRESS),
             g_instance, NULL);
+        toolNew_ = CreateWindowW(L"BUTTON", L"New", WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_TOOL_NEW),
+            g_instance, NULL);
+        toolRefresh_ = CreateWindowW(L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_TOOL_REFRESH),
+            g_instance, NULL);
+        toolView_ = CreateWindowW(L"BUTTON", L"Views", WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_TOOL_VIEW),
+            g_instance, NULL);
+        toolFavorites_ = CreateWindowW(L"BUTTON", L"Favorites", WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_TOOL_FAVORITES),
+            g_instance, NULL);
         go_ = CreateWindowW(L"BUTTON", L"Go", WS_CHILD | WS_VISIBLE,
             0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_GO),
             g_instance, NULL);
@@ -136,21 +235,24 @@ public:
             SS_LEFTNOWORDWRAP, 0, 0, 0, 0, child_,
             reinterpret_cast<HMENU>(IDC_STATUS), g_instance, NULL);
         for (int i = 0; i < 8; ++i) if (!menus_[i]) return false;
-        if (!back_ || !forward_ || !up_ || !address_ || !go_ || !status_ || !tree_ || !folders_)
+        if (!back_ || !forward_ || !up_ || !address_ || !go_ || !status_ || !tree_ || !folders_ || !toolNew_ || !toolRefresh_ ||
+            !toolView_ || !toolFavorites_)
             return false;
         Layout();
         UpdateControls();
         return true;
     }
 
+    int ContentTop() const {
+        return 30 + (g_defaults.toolbar ? 27 : 0) +
+            (g_defaults.address ? 26 : 0);
+    }
     void ViewRect(RECT* rect) const {
         GetClientRect(child_, rect);
-        rect->left = 0;
-        rect->top = 83;
         rect->left = showFolders_ ? 222 : 0;
-        rect->bottom -= 21;
+        rect->top = ContentTop();
+        if (g_defaults.status) rect->bottom -= 21;
         if (rect->left > rect->right) rect->left = rect->right;
-        if (rect->right < rect->left) rect->right = rect->left;
         if (rect->bottom < rect->top) rect->bottom = rect->top;
     }
 
@@ -165,21 +267,43 @@ public:
             if (menus_[i]) MoveWindow(menus_[i], x, 2, menuWidths[i], 24, TRUE);
             x += menuWidths[i] + 2;
         }
-        if (back_) MoveWindow(back_, 3, 30, 51, 24, TRUE);
-        if (forward_) MoveWindow(forward_, 56, 30, 65, 24, TRUE);
-        if (up_) MoveWindow(up_, 123, 30, 38, 24, TRUE);
-        // The address field occupies its own row below the navigation toolbar.
-        if (folders_) MoveWindow(folders_, 165, 30, 65, 24, TRUE);
-        if (address_) MoveWindow(address_, 3, 57,
-            width > 57 ? width - 57 : 0, 23, TRUE);
-        if (go_) MoveWindow(go_, width - 49, 57, 46, 23, TRUE);
+        const bool showToolbar = g_defaults.toolbar;
+        const bool showAddress = g_defaults.address;
+        HWND bar[] = { back_, forward_, up_, folders_, toolNew_,
+            toolRefresh_, toolView_, toolFavorites_ };
+        const int widths[] = { 51, 65, 38, 65, 45, 61, 47, 69 };
+        x = 3;
+        for (int i = 0; i < 8; ++i) {
+            if (!bar[i]) continue;
+            ShowWindow(bar[i], showToolbar ? SW_SHOW : SW_HIDE);
+            if (showToolbar) MoveWindow(bar[i], x, 30, widths[i], 24, TRUE);
+            x += widths[i] + 2;
+        }
+        if (address_) {
+            ShowWindow(address_, showAddress ? SW_SHOW : SW_HIDE);
+            if (showAddress) MoveWindow(address_, 3,
+                30 + (showToolbar ? 27 : 0),
+                width > 57 ? width - 57 : 0, 23, TRUE);
+        }
+        if (go_) {
+            ShowWindow(go_, showAddress ? SW_SHOW : SW_HIDE);
+            if (showAddress) MoveWindow(go_, width - 49,
+                30 + (showToolbar ? 27 : 0), 46, 23, TRUE);
+        }
         if (tree_) {
             ShowWindow(tree_, showFolders_ ? SW_SHOW : SW_HIDE);
-            if (showFolders_) MoveWindow(tree_, 0, 83, 220,
-                height > 104 ? height - 104 : 0, TRUE);
+            if (showFolders_) {
+                const int top = ContentTop();
+                const int bottom = g_defaults.status ? 21 : 0;
+                MoveWindow(tree_, 0, top, 220,
+                    height > top + bottom ? height - top - bottom : 0, TRUE);
+            }
         }
-        if (status_) MoveWindow(status_, 4, height - 20,
-            width > 8 ? width - 8 : 0, 18, TRUE);
+        if (status_) {
+            ShowWindow(status_, g_defaults.status ? SW_SHOW : SW_HIDE);
+            if (g_defaults.status) MoveWindow(status_, 4, height - 20,
+                width > 8 ? width - 8 : 0, 18, TRUE);
+        }
         Resize();
     }
 
@@ -204,6 +328,11 @@ public:
         if (address_ && GetFocus() == address_) editingAddress_ = true;
     }
     void FocusAddress() {
+        if (!g_defaults.address) {
+            g_defaults.address = true;
+            SaveDefaults();
+            ApplyDefaultsToAllChildren();
+        }
         if (address_) {
             SetFocus(address_);
             SendMessageW(address_, EM_SETSEL, 0, -1);
@@ -240,7 +369,23 @@ public:
         if (FAILED(hr)) viewMode_ = previous;
         return hr;
     }
-    void ToggleFolders() { showFolders_ = !showFolders_; Layout(); SyncTree(); }
+    void ToggleFolders() {
+        g_defaults.folders = !g_defaults.folders;
+        SaveDefaults();
+        ApplyDefaultsToAllChildren();
+    }
+    void ApplyDefaults() {
+        if (closed_) return;
+        showFolders_ = g_defaults.folders;
+        Layout();
+        SyncTree();
+        if (pidl_ && viewMode_ != g_defaults.mode) {
+            HRESULT hr = ChangeViewMode(g_defaults.mode);
+            if (FAILED(hr)) ShowFailure(child_, L"Apply view default", hr);
+        } else if (!pidl_) {
+            viewMode_ = g_defaults.mode;
+        }
+    }
     bool FoldersShown() const { return showFolders_; }
     FOLDERVIEWMODE ViewMode() const { return viewMode_; }
     void TreeSelectionChanged(HTREEITEM node) {
@@ -584,6 +729,7 @@ private:
     bool editingAddress_;
     HWND menus_[8];
     HWND address_, back_, forward_, up_, go_, status_, tree_, folders_;
+    HWND toolNew_, toolRefresh_, toolView_, toolFavorites_;
     HTREEITEM treeRoot_;
     bool syncingTree_, showFolders_;
     FOLDERVIEWMODE viewMode_;
@@ -633,6 +779,21 @@ static void ShowFailure(HWND owner, const wchar_t* operation, HRESULT hr) {
     MessageBoxW(owner, text, L"WindowExplorer", MB_OK | MB_ICONEXCLAMATION);
 }
 
+static void ApplyDefaultsToAllChildren() {
+    if (!g_mdi || !IsWindow(g_mdi)) return;
+    // Enumerate direct MDI children, never nested Shell controls.
+    for (HWND child = GetWindow(g_mdi, GW_CHILD); child; ) {
+        HWND next = GetWindow(child, GW_HWNDNEXT);
+        wchar_t className[64];
+        if (GetClassNameW(child, className, 64) &&
+            lstrcmpW(className, kChildClass) == 0) {
+            FolderBrowser* browser = BrowserFor(child);
+            if (browser) browser->ApplyDefaults();
+        }
+        child = next;
+    }
+}
+
 static void UpdateChrome() {
     // Folder controls are now owned by their individual MDI children.
     FolderBrowser* browser = ActiveBrowser();
@@ -654,12 +815,25 @@ void FolderBrowser::OpenMenu(int index) {
         AppendMenuW(popup, MF_STRING, IDM_SELECT_ALL, L"Select &All\tCtrl+A");
         break;
     case 2: // View
+        AppendMenuW(popup, MF_STRING | (viewMode_ == FVM_THUMBNAIL ? MF_CHECKED : 0),
+            IDM_VIEW_THUMBNAILS, L"&Thumbnails");
+        AppendMenuW(popup, MF_STRING | (viewMode_ == FVM_TILE ? MF_CHECKED : 0),
+            IDM_VIEW_TILES, L"&Tiles");
         AppendMenuW(popup, MF_STRING | (viewMode_ == FVM_ICON ? MF_CHECKED : 0),
             IDM_VIEW_ICONS, L"Large &Icons");
         AppendMenuW(popup, MF_STRING | (viewMode_ == FVM_LIST ? MF_CHECKED : 0),
             IDM_VIEW_LIST, L"&List");
         AppendMenuW(popup, MF_STRING | (viewMode_ == FVM_DETAILS ? MF_CHECKED : 0),
             IDM_VIEW_DETAILS, L"&Details");
+        AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(popup, MF_STRING | (g_defaults.toolbar ? MF_CHECKED : 0),
+            IDM_SHOW_TOOLBAR, L"Show &Toolbar");
+        AppendMenuW(popup, MF_STRING | (g_defaults.address ? MF_CHECKED : 0),
+            IDM_SHOW_ADDRESS, L"Show &Address bar");
+        AppendMenuW(popup, MF_STRING | (g_defaults.status ? MF_CHECKED : 0),
+            IDM_SHOW_STATUS, L"Show &Status bar");
+        AppendMenuW(popup, MF_STRING | (showFolders_ ? MF_CHECKED : 0),
+            IDM_FOLDERS, L"Show &Folders pane\tCtrl+F");
         AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
         AppendMenuW(popup, MF_STRING, IDM_REFRESH, L"&Refresh\tF5");
         break;
@@ -677,6 +851,9 @@ void FolderBrowser::OpenMenu(int index) {
         AppendMenuW(popup, MF_STRING | (showFolders_ ? MF_CHECKED : 0),
             IDM_FOLDERS, L"&Folders pane\tCtrl+F");
         AppendMenuW(popup, MF_STRING, IDM_ADDRESS, L"&Address\tCtrl+L");
+        AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(popup, MF_STRING, IDM_GLOBAL_SETTINGS,
+            L"Global display settings...");
         break;
     case 5: // Help
         AppendMenuW(popup, MF_STRING, IDM_ABOUT, L"&About WindowExplorer");
@@ -912,6 +1089,14 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
             case IDC_CHILD_MENU_NAVIGATE: browser->OpenMenu(6); return 0;
             case IDC_CHILD_MENU_WINDOW: browser->OpenMenu(7); return 0;
             case IDC_FOLDERS: browser->ToggleFolders(); return 0;
+            case IDC_TOOL_NEW:
+                PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDM_NEW, 0), 0);
+                return 0;
+            case IDC_TOOL_REFRESH:
+                PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDM_REFRESH, 0), 0);
+                return 0;
+            case IDC_TOOL_VIEW: browser->OpenMenu(2); return 0;
+            case IDC_TOOL_FAVORITES: browser->OpenMenu(3); return 0;
             default: break;
             }
         }
@@ -958,31 +1143,66 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
             if (browser->View()) browser->View()->Refresh();
             return 0;
         case IDM_VIEW_ICONS:
-            hr = browser->ChangeViewMode(FVM_ICON);
-            if (FAILED(hr)) ShowFailure(hwnd, L"Icons view", hr);
-            return 0;
         case IDM_VIEW_LIST:
-            hr = browser->ChangeViewMode(FVM_LIST);
-            if (FAILED(hr)) ShowFailure(hwnd, L"List view", hr);
-            return 0;
         case IDM_VIEW_DETAILS:
-            hr = browser->ChangeViewMode(FVM_DETAILS);
-            if (FAILED(hr)) ShowFailure(hwnd, L"Details view", hr);
+        case IDM_VIEW_THUMBNAILS:
+        case IDM_VIEW_TILES: {
+            FOLDERVIEWMODE mode = FVM_DETAILS;
+            if (command == IDM_VIEW_ICONS) mode = FVM_ICON;
+            else if (command == IDM_VIEW_LIST) mode = FVM_LIST;
+            else if (command == IDM_VIEW_THUMBNAILS) mode = FVM_THUMBNAIL;
+            else if (command == IDM_VIEW_TILES) mode = FVM_TILE;
+            hr = browser->ChangeViewMode(mode);
+            if (FAILED(hr)) ShowFailure(hwnd, L"Change folder view", hr);
+            else {
+                g_defaults.mode = mode;
+                SaveDefaults();
+                ApplyDefaultsToAllChildren();
+            }
             return 0;
+        }
         case IDM_FOLDERS:
             browser->ToggleFolders();
+            return 0;
+        case IDM_SHOW_STATUS:
+            g_defaults.status = !g_defaults.status;
+            SaveDefaults();
+            ApplyDefaultsToAllChildren();
+            return 0;
+        case IDM_SHOW_TOOLBAR:
+            g_defaults.toolbar = !g_defaults.toolbar;
+            SaveDefaults();
+            ApplyDefaultsToAllChildren();
+            return 0;
+        case IDM_SHOW_ADDRESS:
+            g_defaults.address = !g_defaults.address;
+            SaveDefaults();
+            ApplyDefaultsToAllChildren();
+            return 0;
+        case IDM_GLOBAL_SETTINGS:
+            MessageBoxW(hwnd,
+                L"Display settings are shared by all WindowExplorer MDI windows "
+                L"and saved for the next application launch.\n\n"
+                L"Use View to select Thumbnails, Tiles, Icons, List or Details, and toggle the "
+                L"toolbar, address bar, status bar or folder tree.\n\n"
+                L"Settings are stored per Windows user in "
+                L"HKCU\\Software\\Magneticon\\WindowExplorer.\n\n"
+                L"XP grouping and arrangement in the native Shell view are "
+                L"not yet controlled by WindowExplorer.",
+                L"Global display settings", MB_OK | MB_ICONINFORMATION);
             return 0;
         case IDM_SELECT_ALL:
             browser->SelectAll();
             return 0;
         case IDM_FAVORITE_ADD: {
-            // First pass stores filesystem paths in memory for this session.
+            // Filesystem favorites are also persisted for the current Windows user.
             wchar_t realPath[MAX_PATH];
             if (browser->Location() &&
                 SHGetPathFromIDListW(browser->Location(), realPath)) {
                 if (std::find(g_favorites.begin(), g_favorites.end(), realPath)
                     == g_favorites.end()) {
                     g_favorites.push_back(realPath);
+                    SaveDefaults();
                 }
             } else {
                 MessageBoxW(hwnd, L"Favorites currently support filesystem folders.",
@@ -1119,6 +1339,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize = sizeof(wc);
     wc.hInstance = instance;
+    LoadDefaults();
     wc.lpfnWndProc = FrameProc;
     wc.lpszClassName = kFrameClass;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);

@@ -5,35 +5,39 @@ x86/x64. Developed in Visual Studio 2022 using the XP-capable v141_xp toolset.
 The solution also defines W10/v143 builds for a subsequent Windows 10 compatibility
 check.
 
-## Shell integration and MDI layout
+## Explorer MDI layout and persistent global display defaults
 
-The application hosts the operating system's actual `IShellView` inside
-each MDI child; no existing `explorer.exe` process is reparented or captured.
-XP's task pane, native file-list rendering, file icons, and item context
-menus are provided by the Shell view itself.
+The application hosts the OS's native `IShellView` in every MDI child; it
+does not capture or reparent an `explorer.exe` window. XP's classic task pane,
+native item view and item context menus belong to the Shell. The folder tree,
+address bar, toolbar and application menus are WindowExplorer controls.
 
-Each MDI child now also has a native Win32 Shell-namespace folder tree,
-using `IShellFolder::EnumObjects`, absolute PIDLs, and the Shell's shared
-system image list. Expanding folders loads their children on demand;
-clicking a tree folder opens it in the corresponding MDI child's view.
-The tree follows supported folder navigation and can be toggled with
-**Folders** or **Ctrl+F** without affecting other MDI children.
+The new toolbar in each child contains **Back, Forward, Up, Folders,
+New (window), Refresh, Views and Favorites**. The child View menu offers
+**Thumbnails, Tiles, Large Icons, List and Details**, plus visibility toggles
+for the toolbar, address bar, status bar and folder tree. The view-mode
+and pane settings are **global to WindowExplorer**: changing them in one
+child updates all existing children, supplies defaults for new children,
+and survives application restarts. Ctrl+L re-enables and focuses the
+address bar if it was hidden.
 
-Per-child File / Edit / View / Favorites / Tools / Help / Navigate / Window
-popup menus supplement Back / Forward / Up / Folders toolbar buttons,
-an address field, Go button and a status line. View offers Icons, List,
-Details and Refresh. Edit offers Select All. Favorites supports adding
-filesystem folders and opening them within the same application session.
-Each MDI child maintains independent history, folder location and tree.
+Preferences and filesystem Favorites are stored in
+`HKEY_CURRENT_USER\\Software\\Magneticon\\WindowExplorer` using
+Windows XP-compatible registry APIs. Each Windows user account (and
+each separate XP/W10 installation) has its own preferences. The program
+does not modify the normal Windows Explorer's system-wide folder settings.
 
-This is an **XP-style first pass**, not a byte-for-byte clone of Explorer's
-menu bar or icon toolbar. In particular, it does not yet merge all of the
-original Explorer File/Edit/Tools commands, persistent Favorites, native
-Explorer search UI, or the complete Explorer bands. The Shell folder view
-remains the source of file selection, native item context menus and
-operating-system-dependent folder presentation. The tree and Shell task
-pane may both be present, since XP itself renders the task pane inside
-the Shell view.
+**Important XP limitation:** Selecting "Arrange Icons by" / "Show in Groups"
+in the native Shell view is not yet captured or broadcast to other MDI
+children. The documented `IFolderView2::SetGroupBy` interface is available
+only on Vista and later. WindowExplorer does **not** claim to persist or
+synchronize XP's native grouping in this revision. The global display
+defaults apply to commands chosen from WindowExplorer's View menu; external
+changes made directly inside the embedded Shell view are not monitored.
+
+Every child retains its own folder location, Back/Forward history and
+Shell-tree selection. The status, toolbar and address visibility are
+global defaults, not folder-specific preferences.
 
 ## Building (VS2022)
 
@@ -54,31 +58,35 @@ separate target, not a claim that runtime behavior has been validated on W10.
 No .NET Framework, CUDA, helper build BAT, or externally installed Explorer
 process is required by the application.
 
-## First manual GUI test (WXP x64, then W10)
+## Manual GUI acceptance checks
 
-Close **all** running instances of WindowExplorer on the target machine
-before launching the rebuilt executable. A surviving process continues
-displaying the old interface even after the EXE on disk is replaced.
+Before launching the rebuilt executable, close all existing WindowExplorer
+processes on the target machine (including any old, hanging XP instances).
+The build logs and binaries on the two machines are reached through
+`E:\\GPT\\CODEX\\CODEX\\GIT\\WindowExplorer` (W10) and
+`Y:\\GPT\\CODEX\\CODEX\\GIT\\WindowExplorer` (XP); these are
+different drive letters for the **same shared directory**, not distinct
+checkouts. GUI operation requires manual verification on XP.
 
-1. Open a new child and verify the left-hand Desktop/My Computer shell
-   folder tree appears alongside the native folder view and XP task pane.
-2. Expand Desktop, My Computer, drives and nested directories in the tree.
-   Click a tree node and verify only that child's folder view navigates.
-3. Navigate through the native view or address field; confirm the tree
-   selects the nearest matching folder and Back/Forward history still works.
-4. Hide/show the Folders pane (Ctrl+F). Check resize and maximize of child
-   windows and the view/status/toolbar layout.
-5. Test child File, Edit (Select All), View (Icons/List/Details/Refresh),
-   Favorites, Tools, Help and Window menus. Favorites are session-only.
-6. Open a second MDI child, browse elsewhere, switch children and verify
-   that each tree, address and navigation history remains independent.
-7. Check native folder context menus and test copy/paste/drag/drop only with
-   disposable files. Close both children and exit without a hanging process.
-8. Repeat on Windows 10 and record any Shell-view or tree differences.
+1. On XP x64, open two MDI folder windows. Change View > Details to Tiles or
+   Thumbnails in the first child. Verify the second existing child changes,
+   and a subsequently created child starts with the same mode.
+2. Toggle the folders pane, toolbar, address bar, and status bar in View.
+   Verify that all open windows update without hiding the embedded file view.
+   With address hidden, Ctrl+L should restore and focus it.
+3. Test New, Refresh, Views, Favorites and the existing navigation controls
+   on the per-child toolbar. Verify the expanded toolbar remains inside each
+   MDI child and does not cover the XP task pane or file list.
+4. Add a filesystem folder to Favorites. Exit **all** WindowExplorer
+   processes, restart and confirm that Favorites and display defaults
+   return. Check the other MDI child retains independent navigation history.
+5. Use the native Shell's Show in Groups command: note that this is **not**
+   synchronized or persisted by WindowExplorer yet; inspect for regressions.
+6. Repeat on W10, then report any XP-specific compilation, startup,
+   view-mode or UI issues with screenshots/logs.
 
-This is a human-operated GUI program, so an unattended AI_RUN script is not
-required. A successful build is not proof of XP runtime behavior. The
-repository deliberately does not track generated `bin/` executables.
+This GUI build has no unattended `AI_RUN` script. A successful VS2022 build
+does not prove that all XP Shell integration paths work correctly.
 
 ## Technical notes and scope
 
@@ -114,7 +122,7 @@ is ignored by Git.
 
 ## Current development status
 
-The prior MDI Shell-view/navigation build has been observed working on XP x64
-and W10. The **new folder-tree and expanded-menu revision has not yet been
-built or tested on those systems**. Report compiler diagnostics and XP GUI
-screenshots before treating this milestone as verified.
+Previous MDI Shell-view and folder-tree builds were shown operating on XP x64.
+This global-defaults and expanded-toolbar revision has been committed but
+**has not yet been built or exercised on XP or W10**. Grouping support is a
+separate, pending XP Shell integration task.

@@ -13,12 +13,19 @@ the Shell's native file icons, selection, file context menus, and drag/drop beha
 This is not a new file list pretending to be Explorer, and it does **not** use
 SetParent to hijack an explorer.exe window across processes.
 
-Explorer's outer frame (its navigation tree, task pane, command bars, address bar,
-and browser-menu integration) is **not** embedded. WindowExplorer supplies its own
-MDI frame, address field, Back/Up controls, and window-management menu. Additional
-Shell browser services and navigation-pane integration may be required for full
-Explorer-level behavior on different versions of Windows. This is a first GUI
-prototype, not a feature-complete replacement for explorer.exe.
+Explorer's entire outer frame (navigation tree, command bars, address bar,
+and application menu) is **not** embedded. Windows XP's familiar task pane
+is drawn by the native Shell view itself, which you may see inside each child.
+WindowExplorer supplies an independent File/Navigate/View/Window popup-menu
+strip, Back/Forward/Up buttons, address field, Go button and status area in
+**every MDI child**. The top-level frame retains only an Application menu and
+MDI Windows list.
+
+The child menus expose the commands currently implemented by WindowExplorer;
+they do not clone Explorer's complete File/Edit/View/Favorites/Tools/Help menus,
+Shell extension menu merging, navigation tree, or original toolbar icons.
+Native per-file context menus still come from the Shell. Additional Shell
+browser services would be needed for closer Explorer UI parity.
 
 ## Building (VS2022)
 
@@ -49,12 +56,18 @@ XP build succeeds (or choose the corresponding OS/architecture output above).
    place, with an updated caption and address.
 3. Right-click a file and check that the standard Shell context menu appears.
    Check selection, copy/paste and drag/drop with test files, not valuable files.
-4. Use File > New folder window (Ctrl+N); navigate two children independently,
-   switch between them, and try Window > Cascade/Tile.
-5. Enter an existing directory in the address bar and click Go (or press Enter).
-   Check Back, Up and Refresh (F5).
-6. Close one child, then close the application and check for crashes.
-7. Repeat on W10 only after verifying the XP target; record any Shell differences.
+4. In each MDI child, verify the File/Navigate/View/Window popup strips,
+   Back, Forward, Up, address, Go, and status are **inside that child**.
+5. Enter an existing directory in child A's address field and press Enter;
+   browse to a second folder, then test Back and Forward (Alt+Left/Right)
+   and Up (Alt+Up). Check View > Refresh (F5).
+6. Open another folder window (Ctrl+N), navigate child B somewhere different,
+   and verify that B's address and history are independent of A's. Switch
+   windows and verify each child's popup menus control the child clicked.
+7. Use Window > Cascade and Tile, resize children, and confirm that neither
+   the native task pane nor the file list covers child navigation controls.
+8. Close one child, then close the application and check for crashes.
+9. Repeat on W10 only after verifying the XP target; record Shell differences.
 
 This is a human-operated GUI project; no unattended AI_RUN script is supplied.
 The former AI_RUN_WXP.bat was a Hello World/DBGRun placeholder rather than a

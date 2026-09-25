@@ -46,6 +46,12 @@ remaining Shell path can be identified.
 
 ## About Windows and Select All
 
+The main-frame About Windows dialog now contains a longer fictional Windows
+story, including a cameo by XP and an ending about older windows still
+living in their own little windows. Its dialog height has been increased
+so the tale has more room while retaining the existing banner and OK button.
+
+
 The **main MDI frame** now has an ordinary Win32 **Help > About Windows...**
 menu item, separate from the folder-specific Help > About WindowExplorer.
 It opens a modal, XP-inspired About dialog with a four-colour Windows-style

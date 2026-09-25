@@ -1753,10 +1753,21 @@ static INT_PTR CALLBACK AboutWindowsProc(HWND dialog, UINT message,
         SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
         const wchar_t tale[] =
             L"Once upon a time, there was a window. It was alone, "
-            L"so it wanted to make friends.\r\n\r\n"
+            L"so it opened its shutters and invited the world in. "
+            L"Soon it had more friends than it could count.\r\n\r\n"
             L"First, there were 3. Then, there were 95 of them. "
-            L"Five years later, 2000!\r\n\r\n"
-            L"Unfortunately, nowadays, only 11 windows are left.";
+            L"Some were 98, and some were a little ME. "
+            L"Five years later, 2000 windows had gathered!\r\n\r\n"
+            L"One cheerful window was called XP. It loved bright "
+            L"colours, green hills, and keeping old friends close. "
+            L"Then came Windows 7, 8, and 10. "
+            L"Every newcomer wanted a different frame, but they "
+            L"all shared the same view of the world.\r\n\r\n"
+            L"Unfortunately, nowadays, only 11 windows are left. "
+            L"The others have not truly vanished, though. "
+            L"Some still glow on old desks, tucked inside little "
+            L"windows of their own, quietly waiting for someone "
+            L"to open them again.";
         DrawTextW(dc, tale, -1, &body, DT_LEFT | DT_TOP | DT_WORDBREAK);
         SelectObject(dc, oldFont);
         DeleteObject(storyFont);
@@ -1779,7 +1790,7 @@ static void ShowAboutWindows(HWND owner) {
     t.dlg.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME;
     t.dlg.cdit = 0;
     t.dlg.cx = 310;
-    t.dlg.cy = 220;
+    t.dlg.cy = 275; // Extra space for the expanded tale at XP font sizes.
     lstrcpyW(t.title, L"About Windows");
     // A modal dialog owned by the MDI frame keeps this story independent
     // of whichever folder window currently has focus.

@@ -447,7 +447,7 @@ public:
         SyncTree();
         if (pidl_ && viewMode_ != g_defaults.mode) {
             HRESULT hr = ChangeViewMode(g_defaults.mode);
-            if (FAILED(hr)) ShowFailure(child_, L"Apply default view", hr);
+            if (FAILED(hr)) ShowFailure(child_, L"Apply view default", hr);
         } else if (!pidl_) {
             viewMode_ = g_defaults.mode;
         }
@@ -1025,7 +1025,7 @@ void FolderBrowser::OpenMenu(int index) {
     if (!popup) return;
     switch (index) {
     case 0: // File
-        AppendMenuW(popup, MF_STRING, IDM_NEW, L"&New window\tCtrl+N");
+        AppendMenuW(popup, MF_STRING, IDM_NEW, L"&New folder window\tCtrl+N");
         AppendMenuW(popup, MF_STRING, IDM_CLOSE, L"&Close window\tCtrl+W");
         AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
         AppendMenuW(popup, MF_STRING, IDM_EXIT, L"E&xit WindowExplorer");
@@ -1542,7 +1542,7 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
             return 0;
         case IDM_NEW:
             hr = NewFolderWindow(browser->Location());
-            if (FAILED(hr)) ShowFailure(hwnd, L"New window", hr);
+            if (FAILED(hr)) ShowFailure(hwnd, L"New folder window", hr);
             return 0;
         case IDM_CLOSE:
             SendMessageW(g_mdi, WM_MDIDESTROY,
@@ -1596,6 +1596,8 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
                 L"toolbar, address bar, status bar or folder tree.\n\n"
                 L"Settings are stored per Windows user in "
                 L"HKCU\\Software\\Magneticon\\WindowExplorer.\n\n"
+                L"XP grouping and arrangement in the native Shell view are "
+                L"not yet controlled by WindowExplorer.",
                 L"Global display settings", MB_OK | MB_ICONINFORMATION);
             return 0;
         case IDM_EDIT_UNDO:
@@ -1750,19 +1752,20 @@ static INT_PTR CALLBACK AboutWindowsProc(HWND dialog, UINT message,
         oldFont = SelectObject(dc, storyFont);
         SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
         const wchar_t tale[] =
-            L"Once upon a time, there was a window. It was lonely, "
+            L"Once upon a time, there was a window. It was alone, "
             L"so it opened its shutters and invited the world in. "
             L"Soon it had more friends than it could count.\r\n\r\n"
-            L"First, there were 3 of them. Then, there were 95 of them. "
-            L"Some were NT, and some were a little ME. "
-            L"Five years later, 2000 windows were running around!\r\n\r\n"
+            L"First, there were 3. Then, there were 95 of them. "
+            L"Some were 98, and some were a little ME. "
+            L"Five years later, 2000 windows had gathered!\r\n\r\n"
             L"One cheerful window was called XP. It loved bright "
-            L"colors, green hills, and keeping old friends close. "
-            L"Then came Vista. She was an arrogant window. Nobody liked her."
-            L"Over time, only 7 old friends left. And the times were never the same again.\r\n\r\n"
+            L"colours, green hills, and keeping old friends close. "
+            L"Then came Windows 7, 8, and 10. "
+            L"Every newcomer wanted a different frame, but they "
+            L"all shared the same view of the world.\r\n\r\n"
             L"Unfortunately, nowadays, only 11 windows are left. "
-            L"However, The others have not truly vanished, though. "
-            L"Some are still hidding away on the old desks, tucked inside little "
+            L"The others have not truly vanished, though. "
+            L"Some still glow on old desks, tucked inside little "
             L"windows of their own, quietly waiting for someone "
             L"to open them again.";
         DrawTextW(dc, tale, -1, &body, DT_LEFT | DT_TOP | DT_WORDBREAK);

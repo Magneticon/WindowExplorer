@@ -8,6 +8,7 @@
 #include <vector>
 #include <string>
 #include <new>
+#include <algorithm>
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -18,12 +19,18 @@ enum {
     IDC_BACK = 103, IDC_UP = 104, IDC_STATUS = 105,
     IDC_FORWARD = 106, IDC_CHILD_MENU_FILE = 107,
     IDC_CHILD_MENU_NAVIGATE = 108, IDC_CHILD_MENU_VIEW = 109,
-    IDC_CHILD_MENU_WINDOW = 110,
+    IDC_CHILD_MENU_WINDOW = 110, IDC_CHILD_MENU_EDIT = 111,
+    IDC_CHILD_MENU_FAVORITES = 112, IDC_CHILD_MENU_TOOLS = 113,
+    IDC_CHILD_MENU_HELP = 114, IDC_FOLDERS = 115, IDC_TREE = 116,
     IDM_NEW = 1001, IDM_CLOSE = 1002, IDM_EXIT = 1003,
     IDM_BACK = 1004, IDM_UP = 1005, IDM_GO = 1006,
     IDM_REFRESH = 1007, IDM_CASCADE = 1008,
     IDM_TILE_H = 1009, IDM_TILE_V = 1010, IDM_ADDRESS = 1011,
-    IDM_FORWARD = 1012,
+    IDM_FORWARD = 1012, IDM_FOLDERS = 1013,
+    IDM_VIEW_ICONS = 1014, IDM_VIEW_LIST = 1015,
+    IDM_VIEW_DETAILS = 1016, IDM_ABOUT = 1017,
+    IDM_SELECT_ALL = 1018, IDM_FAVORITE_ADD = 1019,
+    IDM_FAVORITE_FIRST = 4000, IDM_FAVORITE_LAST = 4049,
     IDM_FIRST_CHILD = 30000,
     WM_UPDATE_CHROME = WM_APP + 1
 };
@@ -33,6 +40,7 @@ static const wchar_t kChildClass[] = L"WindowExplorer.Folder";
 static HINSTANCE g_instance = NULL;
 static HWND g_frame = NULL, g_mdi = NULL;
 static HACCEL g_accel = NULL;
+static std::vector<std::wstring> g_favorites;
 
 class FolderBrowser;
 static FolderBrowser* ActiveBrowser();
@@ -48,8 +56,10 @@ public:
           folder_(NULL), pidl_(NULL), historyIndex_(-1),
           navigating_(false), closed_(false), editingAddress_(false),
           address_(NULL), back_(NULL), forward_(NULL), up_(NULL),
-          go_(NULL), status_(NULL) {
-        for (int i = 0; i < 4; ++i) menus_[i] = NULL;
+          go_(NULL), status_(NULL), tree_(NULL), folders_(NULL),
+          treeRoot_(NULL), syncingTree_(false), showFolders_(true),
+          viewMode_(FVM_DETAILS) {
+        for (int i = 0; i < 8; ++i) menus_[i] = NULL;
     }
 
     virtual ~FolderBrowser() {
@@ -69,10 +79,13 @@ public:
     HWND AddressEdit() const { return address_; }
 
     bool CreateControls() {
-        const wchar_t* captions[] = { L"&File", L"&Navigate", L"&View", L"&Window" };
-        const int ids[] = { IDC_CHILD_MENU_FILE, IDC_CHILD_MENU_NAVIGATE,
-                            IDC_CHILD_MENU_VIEW, IDC_CHILD_MENU_WINDOW };
-        for (int i = 0; i < 4; ++i) {
+        const wchar_t* captions[] = { L"&File", L"&Edit", L"&View",
+            L"&Favorites", L"&Tools", L"&Help", L"&Navigate", L"&Window" };
+        const int ids[] = { IDC_CHILD_MENU_FILE, IDC_CHILD_MENU_EDIT,
+            IDC_CHILD_MENU_VIEW, IDC_CHILD_MENU_FAVORITES,
+            IDC_CHILD_MENU_TOOLS, IDC_CHILD_MENU_HELP,
+            IDC_CHILD_MENU_NAVIGATE, IDC_CHILD_MENU_WINDOW };
+        for (int i = 0; i < 8; ++i) {
             menus_[i] = CreateWindowW(L"BUTTON", captions[i],
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                 0, 0, 0, 0, child_,
@@ -88,6 +101,30 @@ public:
         up_ = CreateWindowW(L"BUTTON", L"Up", WS_CHILD | WS_VISIBLE,
             0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_UP),
             g_instance, NULL);
+        folders_ = CreateWindowW(L"BUTTON", L"Folders",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, child_,
+            reinterpret_cast<HMENU>(IDC_FOLDERS), g_instance, NULL);
+        tree_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
+            TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT |
+            TVS_SHOWSELALWAYS, 0, 0, 0, 0, child_,
+            reinterpret_cast<HMENU>(IDC_TREE), g_instance, NULL);
+        if (tree_) {
+            SHFILEINFOW shellInfo;
+            ZeroMemory(&shellInfo, sizeof(shellInfo));
+            LPITEMIDLIST desktop = NULL;
+            if (SUCCEEDED(SHGetSpecialFolderLocation(child_, CSIDL_DESKTOP,
+                &desktop))) {
+                HIMAGELIST icons = reinterpret_cast<HIMAGELIST>(SHGetFileInfoW(
+                    reinterpret_cast<LPCWSTR>(desktop), 0, &shellInfo,
+                    sizeof(shellInfo), SHGFI_PIDL | SHGFI_SYSICONINDEX |
+                    SHGFI_SMALLICON));
+                if (icons) TreeView_SetImageList(tree_, icons, TVSIL_NORMAL);
+                treeRoot_ = AddTreeItem(TVI_ROOT, desktop, L"Desktop");
+                if (treeRoot_) TreeView_Expand(tree_, treeRoot_, TVE_EXPAND);
+                CoTaskMemFree(desktop);
+            }
+        }
         address_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
             0, 0, 0, 0, child_, reinterpret_cast<HMENU>(IDC_ADDRESS),
@@ -98,8 +135,8 @@ public:
         status_ = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE |
             SS_LEFTNOWORDWRAP, 0, 0, 0, 0, child_,
             reinterpret_cast<HMENU>(IDC_STATUS), g_instance, NULL);
-        for (int i = 0; i < 4; ++i) if (!menus_[i]) return false;
-        if (!back_ || !forward_ || !up_ || !address_ || !go_ || !status_)
+        for (int i = 0; i < 8; ++i) if (!menus_[i]) return false;
+        if (!back_ || !forward_ || !up_ || !address_ || !go_ || !status_ || !tree_ || !folders_)
             return false;
         Layout();
         UpdateControls();
@@ -109,8 +146,10 @@ public:
     void ViewRect(RECT* rect) const {
         GetClientRect(child_, rect);
         rect->left = 0;
-        rect->top = 58;
+        rect->top = 83;
+        rect->left = showFolders_ ? 222 : 0;
         rect->bottom -= 21;
+        if (rect->left > rect->right) rect->left = rect->right;
         if (rect->right < rect->left) rect->right = rect->left;
         if (rect->bottom < rect->top) rect->bottom = rect->top;
     }
@@ -120,19 +159,25 @@ public:
         GetClientRect(child_, &rc);
         const int width = rc.right - rc.left;
         const int height = rc.bottom - rc.top;
-        const int menuWidths[] = { 54, 85, 55, 75 };
+        const int menuWidths[] = { 42, 42, 44, 76, 51, 43, 68, 61 };
         int x = 3;
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 8; ++i) {
             if (menus_[i]) MoveWindow(menus_[i], x, 2, menuWidths[i], 24, TRUE);
             x += menuWidths[i] + 2;
         }
         if (back_) MoveWindow(back_, 3, 30, 51, 24, TRUE);
         if (forward_) MoveWindow(forward_, 56, 30, 65, 24, TRUE);
         if (up_) MoveWindow(up_, 123, 30, 38, 24, TRUE);
-        int addressWidth = width - 214;
-        if (addressWidth < 20) addressWidth = 20;
-        if (address_) MoveWindow(address_, 165, 30, addressWidth, 24, TRUE);
-        if (go_) MoveWindow(go_, width - 45, 30, 42, 24, TRUE);
+        // The address field occupies its own row below the navigation toolbar.
+        if (folders_) MoveWindow(folders_, 165, 30, 65, 24, TRUE);
+        if (address_) MoveWindow(address_, 3, 57,
+            width > 57 ? width - 57 : 0, 23, TRUE);
+        if (go_) MoveWindow(go_, width - 49, 57, 46, 23, TRUE);
+        if (tree_) {
+            ShowWindow(tree_, showFolders_ ? SW_SHOW : SW_HIDE);
+            if (showFolders_) MoveWindow(tree_, 0, 83, 220,
+                height > 104 ? height - 104 : 0, TRUE);
+        }
         if (status_) MoveWindow(status_, 4, height - 20,
             width > 8 ? width - 8 : 0, 18, TRUE);
         Resize();
@@ -152,6 +197,7 @@ public:
             DisplayName(title);
             SetWindowTextW(status_, title.c_str());
         }
+        SyncTree();
     }
 
     void AddressChanged() {
@@ -181,6 +227,39 @@ public:
     }
 
     void OpenMenu(int index);
+    void ExpandTree(HTREEITEM node);
+    void SyncTree();
+    void SelectAll();
+    HRESULT ChangeViewMode(FOLDERVIEWMODE mode) {
+        if (!pidl_ || viewMode_ == mode) return S_FALSE;
+        const FOLDERVIEWMODE previous = viewMode_;
+        viewMode_ = mode;
+        // Recreate the native Shell view with the requested FOLDERSETTINGS.
+        // The existing history and location are not changed.
+        HRESULT hr = Navigate(pidl_, false);
+        if (FAILED(hr)) viewMode_ = previous;
+        return hr;
+    }
+    void ToggleFolders() { showFolders_ = !showFolders_; Layout(); SyncTree(); }
+    bool FoldersShown() const { return showFolders_; }
+    FOLDERVIEWMODE ViewMode() const { return viewMode_; }
+    void TreeSelectionChanged(HTREEITEM node) {
+        if (syncingTree_ || navigating_ || !node) return;
+        TVITEMW item;
+        ZeroMemory(&item, sizeof(item));
+        item.mask = TVIF_PARAM;
+        item.hItem = node;
+        if (TreeView_GetItem(tree_, &item) && item.lParam) {
+            LPCITEMIDLIST location = reinterpret_cast<LPCITEMIDLIST>(item.lParam);
+            if (!pidl_ || !ILIsEqual(pidl_, location)) {
+                HRESULT hr = Navigate(location);
+                if (FAILED(hr)) ShowFailure(child_, L"Open folder from tree", hr);
+            }
+        }
+    }
+    void DeleteTreeItem(LPARAM value) {
+        if (value) CoTaskMemFree(reinterpret_cast<void*>(value));
+    }
 
     void Close() {
         if (closed_) return;
@@ -199,6 +278,8 @@ public:
             CoTaskMemFree(history_[i]);
         history_.clear();
         historyIndex_ = -1;
+        if (tree_) TreeView_DeleteAllItems(tree_);
+        treeRoot_ = NULL;
     }
 
     void Resize() {
@@ -267,7 +348,7 @@ public:
 
         if (SUCCEEDED(hr)) {
             FOLDERSETTINGS settings;
-            settings.ViewMode = FVM_DETAILS;
+            settings.ViewMode = viewMode_;
             settings.fFlags = FWF_AUTOARRANGE;
             RECT rc;
             ViewRect(&rc);
@@ -501,8 +582,36 @@ private:
     bool navigating_;
     bool closed_;
     bool editingAddress_;
-    HWND menus_[4];
-    HWND address_, back_, forward_, up_, go_, status_;
+    HWND menus_[8];
+    HWND address_, back_, forward_, up_, go_, status_, tree_, folders_;
+    HTREEITEM treeRoot_;
+    bool syncingTree_, showFolders_;
+    FOLDERVIEWMODE viewMode_;
+
+    HTREEITEM AddTreeItem(HTREEITEM parent, LPCITEMIDLIST pidl,
+                         const wchar_t* overrideName = NULL) {
+        LPITEMIDLIST owned = ILClone(pidl);
+        if (!owned) return NULL;
+        SHFILEINFOW file;
+        ZeroMemory(&file, sizeof(file));
+        SHGetFileInfoW(reinterpret_cast<LPCWSTR>(pidl), 0, &file,
+            sizeof(file), SHGFI_PIDL | SHGFI_DISPLAYNAME |
+            SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+        TVINSERTSTRUCTW insert;
+        ZeroMemory(&insert, sizeof(insert));
+        insert.hParent = parent;
+        insert.hInsertAfter = TVI_SORT;
+        insert.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_IMAGE |
+                           TVIF_SELECTEDIMAGE | TVIF_CHILDREN;
+        insert.item.pszText = const_cast<LPWSTR>(overrideName ?
+            overrideName : file.szDisplayName);
+        insert.item.lParam = reinterpret_cast<LPARAM>(owned);
+        insert.item.iImage = insert.item.iSelectedImage = file.iIcon;
+        insert.item.cChildren = 1; // Query children lazily on expansion.
+        HTREEITEM item = TreeView_InsertItem(tree_, &insert);
+        if (!item) CoTaskMemFree(owned);
+        return item;
+    }
 };
 
 static FolderBrowser* BrowserFor(HWND child) {
@@ -531,17 +640,48 @@ static void UpdateChrome() {
 }
 
 void FolderBrowser::OpenMenu(int index) {
-    if (index < 0 || index > 3 || !menus_[index]) return;
+    if (index < 0 || index > 7 || !menus_[index]) return;
     HMENU popup = CreatePopupMenu();
     if (!popup) return;
     switch (index) {
     case 0: // File
-        AppendMenuW(popup, MF_STRING, IDM_NEW, L"New folder &window\tCtrl+N");
-        AppendMenuW(popup, MF_STRING, IDM_CLOSE, L"&Close folder\tCtrl+W");
+        AppendMenuW(popup, MF_STRING, IDM_NEW, L"&New folder window\tCtrl+N");
+        AppendMenuW(popup, MF_STRING, IDM_CLOSE, L"&Close window\tCtrl+W");
         AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
         AppendMenuW(popup, MF_STRING, IDM_EXIT, L"E&xit WindowExplorer");
         break;
-    case 1: // Navigate
+    case 1: // Edit
+        AppendMenuW(popup, MF_STRING, IDM_SELECT_ALL, L"Select &All\tCtrl+A");
+        break;
+    case 2: // View
+        AppendMenuW(popup, MF_STRING | (viewMode_ == FVM_ICON ? MF_CHECKED : 0),
+            IDM_VIEW_ICONS, L"Large &Icons");
+        AppendMenuW(popup, MF_STRING | (viewMode_ == FVM_LIST ? MF_CHECKED : 0),
+            IDM_VIEW_LIST, L"&List");
+        AppendMenuW(popup, MF_STRING | (viewMode_ == FVM_DETAILS ? MF_CHECKED : 0),
+            IDM_VIEW_DETAILS, L"&Details");
+        AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(popup, MF_STRING, IDM_REFRESH, L"&Refresh\tF5");
+        break;
+    case 3: // Favorites
+        AppendMenuW(popup, MF_STRING, IDM_FAVORITE_ADD, L"&Add current folder");
+        AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
+        if (g_favorites.empty())
+            AppendMenuW(popup, MF_STRING | MF_GRAYED, 0, L"(No favorites yet)");
+        for (size_t i = 0; i < g_favorites.size() &&
+                i < IDM_FAVORITE_LAST - IDM_FAVORITE_FIRST + 1; ++i)
+            AppendMenuW(popup, MF_STRING, IDM_FAVORITE_FIRST + static_cast<UINT>(i),
+                g_favorites[i].c_str());
+        break;
+    case 4: // Tools
+        AppendMenuW(popup, MF_STRING | (showFolders_ ? MF_CHECKED : 0),
+            IDM_FOLDERS, L"&Folders pane\tCtrl+F");
+        AppendMenuW(popup, MF_STRING, IDM_ADDRESS, L"&Address\tCtrl+L");
+        break;
+    case 5: // Help
+        AppendMenuW(popup, MF_STRING, IDM_ABOUT, L"&About WindowExplorer");
+        break;
+    case 6: // Navigate
         AppendMenuW(popup, MF_STRING | (CanBack() ? 0 : MF_GRAYED),
             IDM_BACK, L"&Back\tAlt+Left");
         AppendMenuW(popup, MF_STRING | (CanForward() ? 0 : MF_GRAYED),
@@ -551,10 +691,7 @@ void FolderBrowser::OpenMenu(int index) {
         AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
         AppendMenuW(popup, MF_STRING, IDM_ADDRESS, L"&Address\tCtrl+L");
         break;
-    case 2: // View
-        AppendMenuW(popup, MF_STRING, IDM_REFRESH, L"&Refresh\tF5");
-        break;
-    case 3: // Window
+    case 7: // Window
         AppendMenuW(popup, MF_STRING, IDM_CASCADE, L"&Cascade");
         AppendMenuW(popup, MF_STRING, IDM_TILE_H, L"Tile &horizontally");
         AppendMenuW(popup, MF_STRING, IDM_TILE_V, L"Tile &vertically");
@@ -569,6 +706,108 @@ void FolderBrowser::OpenMenu(int index) {
         anchor.left, anchor.bottom, child_, NULL);
     DestroyMenu(popup);
     if (selected) PostMessageW(child_, WM_COMMAND, MAKEWPARAM(selected, 0), 0);
+}
+
+
+/* Store absolute Shell PIDLs in the native TreeView; each node owns a clone.
+ * Only enumerate children of expanded nodes to keep My Computer responsive
+ * even when a drive or network location is slow to enumerate.
+ */
+void FolderBrowser::ExpandTree(HTREEITEM node) {
+    if (!tree_ || !node || TreeView_GetChild(tree_, node)) return;
+    TVITEMW item;
+    ZeroMemory(&item, sizeof(item));
+    item.hItem = node;
+    item.mask = TVIF_PARAM;
+    if (!TreeView_GetItem(tree_, &item) || !item.lParam) return;
+    LPCITEMIDLIST parent = reinterpret_cast<LPCITEMIDLIST>(item.lParam);
+    IShellFolder* desktop = NULL;
+    IShellFolder* folder = NULL;
+    if (FAILED(SHGetDesktopFolder(&desktop))) return;
+    HRESULT hr = S_OK;
+    if (parent->mkid.cb == 0) {
+        folder = desktop;
+        folder->AddRef();
+    } else {
+        hr = desktop->BindToObject(parent, NULL, IID_IShellFolder,
+            reinterpret_cast<void**>(&folder));
+    }
+    if (SUCCEEDED(hr) && folder) {
+        IEnumIDList* enumerator = NULL;
+        hr = folder->EnumObjects(child_,
+            SHCONTF_FOLDERS | SHCONTF_INCLUDEHIDDEN, &enumerator);
+        if (SUCCEEDED(hr) && enumerator) {
+            LPITEMIDLIST relative = NULL;
+            ULONG fetched = 0;
+            while (enumerator->Next(1, &relative, &fetched) == S_OK) {
+                LPITEMIDLIST absolute = ILCombine(parent, relative);
+                if (absolute) {
+                    AddTreeItem(node, absolute);
+                    CoTaskMemFree(absolute);
+                }
+                CoTaskMemFree(relative);
+                relative = NULL;
+            }
+            enumerator->Release();
+        }
+        folder->Release();
+    }
+    desktop->Release();
+}
+
+void FolderBrowser::SyncTree() {
+    if (!tree_ || !treeRoot_ || !pidl_ || syncingTree_ ||
+        !showFolders_ || closed_) return;
+    syncingTree_ = true;
+    HTREEITEM cursor = treeRoot_;
+    // The Desktop PIDL is the root of the Shell namespace. Work downward
+    // selecting the nearest ancestor of the current location at each level.
+    for (int depth = 0; depth < 128 && cursor; ++depth) {
+        TVITEMW item;
+        ZeroMemory(&item, sizeof(item));
+        item.mask = TVIF_PARAM;
+        item.hItem = cursor;
+        if (!TreeView_GetItem(tree_, &item) || !item.lParam) break;
+        LPCITEMIDLIST ancestor = reinterpret_cast<LPCITEMIDLIST>(item.lParam);
+        if (ILIsEqual(ancestor, pidl_)) break;
+        ExpandTree(cursor);
+        TreeView_Expand(tree_, cursor, TVE_EXPAND);
+        HTREEITEM next = NULL;
+        for (HTREEITEM candidate = TreeView_GetChild(tree_, cursor); candidate;
+            candidate = TreeView_GetNextSibling(tree_, candidate)) {
+            TVITEMW childItem;
+            ZeroMemory(&childItem, sizeof(childItem));
+            childItem.mask = TVIF_PARAM;
+            childItem.hItem = candidate;
+            if (TreeView_GetItem(tree_, &childItem) && childItem.lParam) {
+                LPCITEMIDLIST childPidl =
+                    reinterpret_cast<LPCITEMIDLIST>(childItem.lParam);
+                if (ILIsEqual(childPidl, pidl_) ||
+                    ILIsParent(childPidl, pidl_, FALSE)) {
+                    next = candidate;
+                    break;
+                }
+            }
+        }
+        if (!next) break;
+        cursor = next;
+    }
+    if (cursor) TreeView_SelectItem(tree_, cursor);
+    syncingTree_ = false;
+}
+
+void FolderBrowser::SelectAll() {
+    if (!viewWindow_) return;
+    // XP Shell view contains a native SysListView32 control.
+    HWND list = FindWindowExW(viewWindow_, NULL, WC_LISTVIEWW, NULL);
+    if (!list) {
+        HWND inner = FindWindowExW(viewWindow_, NULL, L"SHELLDLL_DefView", NULL);
+        if (inner) list = FindWindowExW(inner, NULL, WC_LISTVIEWW, NULL);
+    }
+    if (list) {
+        ListView_SetItemState(list, -1, LVIS_SELECTED, LVIS_SELECTED);
+        SetFocus(list);
+    }
 }
 
 static HRESULT NewFolderWindow(LPCITEMIDLIST location) {
@@ -623,6 +862,27 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
     case WM_SIZE:
         if (browser && wParam != SIZE_MINIMIZED) browser->Layout();
         break;
+    case WM_NOTIFY:
+        if (browser && lParam) {
+            NMHDR* notification = reinterpret_cast<NMHDR*>(lParam);
+            if (notification->idFrom == IDC_TREE) {
+                NMTREEVIEWW* change = reinterpret_cast<NMTREEVIEWW*>(lParam);
+                if (notification->code == TVN_ITEMEXPANDINGW &&
+                    change->action == TVE_EXPAND) {
+                    browser->ExpandTree(change->itemNew.hItem);
+                    return 0;
+                }
+                if (notification->code == TVN_SELCHANGEDW) {
+                    browser->TreeSelectionChanged(change->itemNew.hItem);
+                    return 0;
+                }
+                if (notification->code == TVN_DELETEITEMW) {
+                    browser->DeleteTreeItem(change->itemOld.lParam);
+                    return 0;
+                }
+            }
+        }
+        break;
     case WM_SETFOCUS:
         if (browser && browser->View()) browser->Activate(true);
         return 0;
@@ -644,13 +904,27 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
         if (HIWORD(wParam) == BN_CLICKED) {
             switch (command) {
             case IDC_CHILD_MENU_FILE: browser->OpenMenu(0); return 0;
-            case IDC_CHILD_MENU_NAVIGATE: browser->OpenMenu(1); return 0;
+            case IDC_CHILD_MENU_EDIT: browser->OpenMenu(1); return 0;
             case IDC_CHILD_MENU_VIEW: browser->OpenMenu(2); return 0;
-            case IDC_CHILD_MENU_WINDOW: browser->OpenMenu(3); return 0;
+            case IDC_CHILD_MENU_FAVORITES: browser->OpenMenu(3); return 0;
+            case IDC_CHILD_MENU_TOOLS: browser->OpenMenu(4); return 0;
+            case IDC_CHILD_MENU_HELP: browser->OpenMenu(5); return 0;
+            case IDC_CHILD_MENU_NAVIGATE: browser->OpenMenu(6); return 0;
+            case IDC_CHILD_MENU_WINDOW: browser->OpenMenu(7); return 0;
+            case IDC_FOLDERS: browser->ToggleFolders(); return 0;
             default: break;
             }
         }
         HRESULT hr = S_OK;
+        if (command >= IDM_FAVORITE_FIRST &&
+            command <= IDM_FAVORITE_LAST) {
+            size_t index = static_cast<size_t>(command - IDM_FAVORITE_FIRST);
+            if (index < g_favorites.size()) {
+                hr = browser->Go(g_favorites[index].c_str());
+                if (FAILED(hr)) ShowFailure(hwnd, L"Open favorite", hr);
+            }
+            return 0;
+        }
         switch (command) {
         case IDC_GO:
         case IDM_GO:
@@ -682,6 +956,45 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
             return 0;
         case IDM_REFRESH:
             if (browser->View()) browser->View()->Refresh();
+            return 0;
+        case IDM_VIEW_ICONS:
+            hr = browser->ChangeViewMode(FVM_ICON);
+            if (FAILED(hr)) ShowFailure(hwnd, L"Icons view", hr);
+            return 0;
+        case IDM_VIEW_LIST:
+            hr = browser->ChangeViewMode(FVM_LIST);
+            if (FAILED(hr)) ShowFailure(hwnd, L"List view", hr);
+            return 0;
+        case IDM_VIEW_DETAILS:
+            hr = browser->ChangeViewMode(FVM_DETAILS);
+            if (FAILED(hr)) ShowFailure(hwnd, L"Details view", hr);
+            return 0;
+        case IDM_FOLDERS:
+            browser->ToggleFolders();
+            return 0;
+        case IDM_SELECT_ALL:
+            browser->SelectAll();
+            return 0;
+        case IDM_FAVORITE_ADD: {
+            // First pass stores filesystem paths in memory for this session.
+            wchar_t realPath[MAX_PATH];
+            if (browser->Location() &&
+                SHGetPathFromIDListW(browser->Location(), realPath)) {
+                if (std::find(g_favorites.begin(), g_favorites.end(), realPath)
+                    == g_favorites.end()) {
+                    g_favorites.push_back(realPath);
+                }
+            } else {
+                MessageBoxW(hwnd, L"Favorites currently support filesystem folders.",
+                    L"WindowExplorer", MB_OK | MB_ICONINFORMATION);
+            }
+            return 0;
+        }
+        case IDM_ABOUT:
+            MessageBoxW(hwnd,
+                L"WindowExplorer\nNative MDI host for Windows Shell views.\n"
+                L"Folder tree and per-window menus are XP-compatible Shell integrations.",
+                L"About WindowExplorer", MB_OK | MB_ICONINFORMATION);
             return 0;
         case IDM_CASCADE:
             SendMessageW(g_mdi, WM_MDICASCADE, 0, 0);
@@ -765,7 +1078,7 @@ static LRESULT CALLBACK FrameProc(HWND hwnd, UINT message,
             DestroyWindow(hwnd);
             return 0;
         }
-        if (command >= IDM_NEW && command <= IDM_FORWARD) {
+        if (command >= IDM_NEW && command <= IDM_FAVORITE_ADD) {
             FolderBrowser* browser = ActiveBrowser();
             if (browser)
                 return SendMessageW(browser->Child(), WM_COMMAND,
@@ -799,7 +1112,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
     }
     INITCOMMONCONTROLSEX common;
     common.dwSize = sizeof(common);
-    common.dwICC = ICC_BAR_CLASSES;
+    common.dwICC = ICC_BAR_CLASSES | ICC_TREEVIEW_CLASSES | ICC_LISTVIEW_CLASSES;
     InitCommonControlsEx(&common);
 
     WNDCLASSEXW wc;
@@ -827,6 +1140,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
         { FVIRTKEY | FCONTROL, 'N', IDM_NEW },
         { FVIRTKEY | FCONTROL, 'W', IDM_CLOSE },
         { FVIRTKEY | FCONTROL, 'L', IDM_ADDRESS },
+        { FVIRTKEY | FCONTROL, 'F', IDM_FOLDERS },
+        { FVIRTKEY | FCONTROL, 'A', IDM_SELECT_ALL },
         { FVIRTKEY | FALT, VK_LEFT, IDM_BACK },
         { FVIRTKEY | FALT, VK_RIGHT, IDM_FORWARD },
         { FVIRTKEY | FALT, VK_UP, IDM_UP },

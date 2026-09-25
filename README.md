@@ -89,17 +89,19 @@ A successful build does not establish that the Shell view actually works on XP.
   view's complete command menu; some Explorer commands, preview panes, or
   version-specific features may require additional browser interfaces.
 
-## Confirming which executable was compiled
+## Running the latest executable
 
-For the next XP x64 GUI check, the updated program's **main-window title is
-`WindowExplorer [CHILD-UI-BUILD-2]`**. Its main menu reads **Application / Windows**,
-while every MDI child has **File / Navigate / View / Window** plus
-Back / Forward / Up / address / Go controls.
+The main window is titled **WindowExplorer**. Its main menu reads
+**Application / Windows**, while every MDI child has **File / Navigate /
+View / Window** and independent Back / Forward / Up / address / Go controls.
 
-The project now assigns a new object-file name to main.cpp to invalidate a
-possibly reused incremental build object. The build should show
-`WindowExplorer CHILD-UI-BUILD-2` and the full project/source/output paths.
-If an XP build reports success but its executable still shows the old main
-menu/title, compare the project and output path in that build message with the
-executable actually launched. The repository's `bin/` directory is ignored;
-GitHub tracks the source, **not** the generated EXE.
+Before manually testing a rebuilt EXE, **exit every running WindowExplorer
+instance on the target system**. A previously launched process continues to
+execute its old program image even if a newer executable replaces the file
+on disk. The initial apparent XP/Windows 10 interface discrepancy was caused
+by surviving old processes on XP, not by a separate XP interface.
+
+Build diagnostics still identify the project, source and output paths without
+printing a temporary version string in the title bar. XP x64 Release runs from
+`bin\Release\WXP\x64\WindowExplorer.exe`; the repository's `bin/` directory
+is ignored by Git.

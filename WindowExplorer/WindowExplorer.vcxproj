@@ -132,13 +132,13 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
-      <!-- New output name invalidates old main.obj on the next build. -->
-      <ObjectFileName>$(IntDir)WindowExplorer_ChildUI_Build2.obj</ObjectFileName>
+      <!-- Keep a dedicated object name to avoid reusing original prototype objects. -->
+      <ObjectFileName>$(IntDir)WindowExplorer_MDIChild.obj</ObjectFileName>
     </ClCompile>
   </ItemGroup>
-  <!-- An unambiguous record of the source/project selected by MSBuild. -->
+  <!-- Keep paths in build diagnostics without a temporary UI/build marker. -->
   <Target Name="WindowExplorerBuildIdentity" BeforeTargets="ClCompile">
-    <Message Importance="High" Text="WindowExplorer CHILD-UI-BUILD-2: project $(MSBuildProjectFullPath); source $(MSBuildProjectDirectory)\main.cpp; target $(AtaTargetOS)/$(Platform); output $(OutDir)$(TargetName)$(TargetExt)" />
+    <Message Importance="High" Text="WindowExplorer build: project $(MSBuildProjectFullPath); source $(MSBuildProjectDirectory)\main.cpp; target $(AtaTargetOS)/$(Platform); output $(OutDir)$(TargetName)$(TargetExt)" />
   </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

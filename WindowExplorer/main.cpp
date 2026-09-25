@@ -9,9 +9,6 @@
 #include <string>
 #include <new>
 
-// If this message is absent from a clean build, main.cpp was not compiled.
-#pragma message("WindowExplorer CHILD-UI-BUILD-2: compiling source " __FILE__)
-
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "comctl32.lib")
@@ -837,7 +834,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int show) {
     };
     g_accel = CreateAcceleratorTableW(keys, sizeof(keys) / sizeof(keys[0]));
     g_frame = CreateWindowExW(0, kFrameClass,
-        L"WindowExplorer [CHILD-UI-BUILD-2]",
+        L"WindowExplorer",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 1024, 700, NULL, NULL, instance, NULL);
     if (!g_frame) {

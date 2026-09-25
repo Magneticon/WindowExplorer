@@ -41,7 +41,7 @@ enum {
     IDM_EDIT_PASTE_LINK = 1034, IDM_EDIT_COPY_TO = 1035,
     IDM_EDIT_MOVE_TO = 1036, IDM_EDIT_INVERT = 1037,
     IDM_EDIT_DELETE = 1038, IDM_EDIT_RENAME = 1039,
-    IDM_EDIT_PROPERTIES = 1040,
+    IDM_EDIT_PROPERTIES = 1040, IDM_ABOUT_WINDOWS = 1041,
     IDM_MENU_FILE = 1050, IDM_MENU_EDIT = 1051,
     IDM_MENU_VIEW = 1052, IDM_MENU_FAVORITES = 1053,
     IDM_MENU_TOOLS = 1054, IDM_MENU_HELP = 1055,
@@ -1234,16 +1234,30 @@ HRESULT FolderBrowser::EditCommand(UINT command) {
     return hr;
 }
 
-void FolderBrowser::SelectAll() {
-    if (!viewWindow_) return;
-    HWND list = FindWindowExW(viewWindow_, NULL, WC_LISTVIEWW, NULL);
-    if (!list) {
-        HWND inner = FindWindowExW(viewWindow_, NULL, L"SHELLDLL_DefView", NULL);
-        if (inner) list = FindWindowExW(inner, NULL, WC_LISTVIEWW, NULL);
+// On XP the Shell's SysListView32 can be nested several levels below the
+// IShellView HWND (including SHELLDLL_DefView). The prior one-level lookup
+// missed it, which made Edit > Select All appear to do nothing while the
+// Shell's own Ctrl+A keyboard handler continued to work.
+static HWND FindShellListView(HWND parent) {
+    if (!parent || !IsWindow(parent)) return NULL;
+    wchar_t className[64];
+    if (GetClassNameW(parent, className, 64) &&
+        lstrcmpiW(className, WC_LISTVIEWW) == 0)
+        return parent;
+    for (HWND child = GetWindow(parent, GW_CHILD); child;
+         child = GetWindow(child, GW_HWNDNEXT)) {
+        HWND match = FindShellListView(child);
+        if (match) return match;
     }
+    return NULL;
+}
+
+void FolderBrowser::SelectAll() {
+    if (!viewWindow_ || !IsWindow(viewWindow_)) return;
+    HWND list = FindShellListView(viewWindow_);
     if (list) {
-        ListView_SetItemState(list, -1, LVIS_SELECTED, LVIS_SELECTED);
         SetFocus(list);
+        ListView_SetItemState(list, -1, LVIS_SELECTED, LVIS_SELECTED);
     }
 }
 
@@ -1519,12 +1533,139 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
     return DefMDIChildProcW(hwnd, message, wParam, lParam);
 }
 
+// A custom modal About dialog: XP-inspired Windows banner + our little tale
+// instead of licensing, memory and OS-version details. No external bitmap
+// or modern UI framework is needed, so it also runs under XP x64.
+static INT_PTR CALLBACK AboutWindowsProc(HWND dialog, UINT message,
+                                         WPARAM wParam, LPARAM) {
+    switch (message) {
+    case WM_INITDIALOG: {
+        RECT client;
+        GetClientRect(dialog, &client);
+        HDC metricsDc = GetDC(dialog);
+        const int dpi = metricsDc ? GetDeviceCaps(metricsDc, LOGPIXELSY) : 96;
+        if (metricsDc) ReleaseDC(dialog, metricsDc);
+        const int margin = MulDiv(16, dpi, 96);
+        const int buttonW = MulDiv(78, dpi, 96);
+        const int buttonH = MulDiv(27, dpi, 96);
+        HWND ok = CreateWindowW(L"BUTTON", L"OK",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            client.right - margin - buttonW,
+            client.bottom - margin - buttonH, buttonW, buttonH,
+            dialog, reinterpret_cast<HMENU>(IDOK), g_instance, NULL);
+        if (ok) SetFocus(ok);
+        return FALSE;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL) {
+            EndDialog(dialog, LOWORD(wParam));
+            return TRUE;
+        }
+        break;
+    case WM_CLOSE:
+        EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    case WM_PAINT: {
+        PAINTSTRUCT paint;
+        HDC dc = BeginPaint(dialog, &paint);
+        RECT client;
+        GetClientRect(dialog, &client);
+        const int dpi = GetDeviceCaps(dc, LOGPIXELSY);
+        const int bannerH = MulDiv(100, dpi, 96);
+        RECT banner = { 0, 0, client.right, bannerH };
+        HBRUSH bannerBrush = CreateSolidBrush(RGB(79, 124, 207));
+        FillRect(dc, &banner, bannerBrush);
+        DeleteObject(bannerBrush);
+        // Four coloured panes evoke the original Windows logo without
+        // depending on a version-specific shell32.dll bitmap resource.
+        const int x = MulDiv(23, dpi, 96);
+        const int y = MulDiv(22, dpi, 96);
+        POINT panes[4][4] = {
+            { {x+0,y+5}, {x+30,y+1}, {x+29,y+28}, {x+0,y+31} },
+            { {x+35,y+1}, {x+68,y+0}, {x+68,y+29}, {x+34,y+28} },
+            { {x+0,y+36}, {x+29,y+33}, {x+29,y+60}, {x+0,y+64} },
+            { {x+34,y+33}, {x+68,y+34}, {x+68,y+64}, {x+34,y+60} }
+        };
+        COLORREF colors[4] = {
+            RGB(234, 80, 44), RGB(110, 178, 42),
+            RGB(49, 141, 224), RGB(241, 198, 48)
+        };
+        HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+        for (int i = 0; i < 4; ++i) {
+            HBRUSH brush = CreateSolidBrush(colors[i]);
+            HGDIOBJ oldBrush = SelectObject(dc, brush);
+            Polygon(dc, panes[i], 4);
+            SelectObject(dc, oldBrush);
+            DeleteObject(brush);
+        }
+        SelectObject(dc, oldPen);
+        SetBkMode(dc, TRANSPARENT);
+        HFONT titleFont = CreateFontW(-MulDiv(33, dpi, 96), 0, 0, 0,
+            FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_SWISS, L"Tahoma");
+        HGDIOBJ oldFont = SelectObject(dc, titleFont);
+        SetTextColor(dc, RGB(255,255,255));
+        RECT heading = { MulDiv(112,dpi,96), MulDiv(23,dpi,96),
+                         client.right - 10, bannerH };
+        DrawTextW(dc, L"Windows", -1, &heading, DT_SINGLELINE | DT_LEFT);
+        SelectObject(dc, oldFont);
+        DeleteObject(titleFont);
+
+        RECT body = client;
+        body.left += MulDiv(22, dpi, 96);
+        body.right -= MulDiv(20, dpi, 96);
+        body.top = bannerH + MulDiv(18, dpi, 96);
+        body.bottom -= MulDiv(49, dpi, 96);
+        HFONT storyFont = CreateFontW(-MulDiv(17, dpi, 96), 0, 0, 0,
+            FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+            DEFAULT_PITCH | FF_SWISS, L"Tahoma");
+        oldFont = SelectObject(dc, storyFont);
+        SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+        const wchar_t tale[] =
+            L"Once upon a time, there was a window. It was alone, "
+            L"so it wanted to make friends.\r\n\r\n"
+            L"First, there were 3. Then, there were 95 of them. "
+            L"Five years later, 2000!\r\n\r\n"
+            L"Unfortunately, nowadays, only 11 windows are left.";
+        DrawTextW(dc, tale, -1, &body, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        SelectObject(dc, oldFont);
+        DeleteObject(storyFont);
+        EndPaint(dialog, &paint);
+        return TRUE;
+    }
+    }
+    return FALSE;
+}
+
+static void ShowAboutWindows(HWND owner) {
+    struct AboutTemplate {
+        DLGTEMPLATE dlg;
+        WORD menu;
+        WORD windowClass;
+        WCHAR title[16];
+    };
+    AboutTemplate t;
+    ZeroMemory(&t, sizeof(t));
+    t.dlg.style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME;
+    t.dlg.cdit = 0;
+    t.dlg.cx = 310;
+    t.dlg.cy = 220;
+    lstrcpyW(t.title, L"About Windows");
+    // A modal dialog owned by the MDI frame keeps this story independent
+    // of whichever folder window currently has focus.
+    DialogBoxIndirectParamW(g_instance, &t.dlg, owner,
+        AboutWindowsProc, 0);
+}
+
 static HMENU MakeMenu() {
     // A minimal application-level menu is retained for Exit and the MDI
     // window list. The folder-specific command menus live in each child.
     HMENU menu = CreateMenu();
     HMENU application = CreatePopupMenu();
     HMENU windows = CreatePopupMenu();
+    HMENU help = CreatePopupMenu();
     AppendMenuW(application, MF_STRING, IDM_NEW, L"&New folder window\tCtrl+N");
     AppendMenuW(application, MF_SEPARATOR, 0, NULL);
     AppendMenuW(application, MF_STRING, IDM_EXIT, L"E&xit");
@@ -1535,6 +1676,8 @@ static HMENU MakeMenu() {
         L"&Application");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(windows),
         L"&Windows");
+    AppendMenuW(help, MF_STRING, IDM_ABOUT_WINDOWS, L"&About Windows...");
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(help), L"&Help");
     return menu;
 }
 
@@ -1569,6 +1712,10 @@ static LRESULT CALLBACK FrameProc(HWND hwnd, UINT message,
         return 0;
     case WM_COMMAND: {
         const int command = LOWORD(wParam);
+        if (command == IDM_ABOUT_WINDOWS) {
+            if (!g_shuttingDown) ShowAboutWindows(hwnd);
+            return 0;
+        }
         if (command == IDM_EXIT) {
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
             return 0;

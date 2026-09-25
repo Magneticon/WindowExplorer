@@ -5,6 +5,24 @@ x86/x64. Developed in Visual Studio 2022 using the XP-capable v141_xp toolset.
 The solution also defines W10/v143 builds for a subsequent Windows 10 compatibility
 check.
 
+## About Windows and Select All
+
+The **main MDI frame** now has an ordinary Win32 **Help > About Windows...**
+menu item, separate from the folder-specific Help > About WindowExplorer.
+It opens a modal, XP-inspired About dialog with a four-colour Windows-style
+logo/banner and a short fictional tale instead of operating-system version,
+licensing and memory information. The dialog is hand-drawn using Win32 GDI;
+no XP system resources, bitmaps, or additional project dependencies are needed.
+
+**Edit > Select All** now searches recursively for the native Shell
+`SysListView32` under each folder's `IShellView` before selecting its
+items. The earlier implementation only searched one level deep, which
+missed the actual file list on XP even though Ctrl+A worked.
+
+This revision requires a clean XP GUI test; it has been committed but
+has not been compiled or tested by the assistant. Close all surviving
+WindowExplorer processes before launching the updated executable.
+
 ## Native Shell view, child menus and toolbar
 
 WindowExplorer hosts the OS's real `IShellView` per MDI child. The XP task

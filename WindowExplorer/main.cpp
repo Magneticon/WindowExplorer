@@ -1595,7 +1595,7 @@ static LRESULT CALLBACK ChildProc(HWND hwnd, UINT message,
                 L"Use View to select Thumbnails, Tiles, Icons, List or Details, and toggle the "
                 L"toolbar, address bar, status bar or folder tree.\n\n"
                 L"Settings are stored per Windows user in "
-                L"HKCU\\Software\\Magneticon\\WindowExplorer.\n\n"
+                L"HKCU\\Software\\Magneticon\\WindowExplorer.\n\n",
                 L"Global display settings", MB_OK | MB_ICONINFORMATION);
             return 0;
         case IDM_EDIT_UNDO:
